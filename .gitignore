@@ -1,0 +1,6 @@
+data/
+__pycache__/
+*.pyc
+.env
+# corporate CA certs for TLS-inspecting proxies (local only)
+*/certs/*.crt

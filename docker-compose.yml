@@ -1,0 +1,82 @@
+name: asterisk-poc
+
+x-asterisk: &asterisk
+  image: asterisk-poc:22
+
+services:
+  pbx:
+    <<: *asterisk
+    build: ./asterisk
+    container_name: poc-pbx
+    restart: unless-stopped
+    environment:
+      # IP the softphone on the Docker host uses to reach RTP (use your LAN IP for phones on the LAN)
+      HOST_MEDIA_ADDR: ${HOST_MEDIA_ADDR:-127.0.0.1}
+    ports:
+      - "${BIND_ADDR:-127.0.0.1}:5060:5060/udp"
+      - "${BIND_ADDR:-127.0.0.1}:10000-10050:10000-10050/udp"
+      - "127.0.0.1:5038:5038"   # AMI
+      - "127.0.0.1:8088:8088"   # ARI / HTTP
+    volumes:
+      - ./asterisk/etc:/etc/asterisk-src:ro
+      - pbx-monitor:/var/spool/asterisk/monitor
+      - pbx-log:/var/log/asterisk
+    networks:
+      poc:
+        ipv4_address: 172.28.0.10
+
+  # test harness: second Asterisk = simulated agent phones + simulated carrier (ARI controlled)
+  sim:
+    <<: *asterisk
+    container_name: poc-sim
+    restart: unless-stopped
+    depends_on: [pbx]
+    volumes:
+      - ./sim/etc:/etc/asterisk-src:ro
+    ports:
+      - "127.0.0.1:8089:8088"
+    networks:
+      poc:
+        ipv4_address: 172.28.0.20
+
+  api:
+    build: ./api
+    container_name: poc-api
+    restart: unless-stopped
+    depends_on: [pbx, sim]
+    environment:
+      API_KEY: ${API_KEY:-poc-api-key}
+    ports:
+      - "127.0.0.1:8000:8000"
+    volumes:
+      - pbx-monitor:/pbx-monitor:ro
+      - pbx-log:/pbx-log:ro
+    networks:
+      poc:
+        ipv4_address: 172.28.0.30
+
+  e2e:
+    build: ./api
+    profiles: [test]
+    depends_on: [pbx, sim, api]
+    working_dir: /tests
+    command: ["python", "e2e.py"]
+    environment:
+      API_URL: http://api:8000
+      API_KEY: ${API_KEY:-poc-api-key}
+      SIM_ARI: sim:8088
+    volumes:
+      - ./tests:/tests:ro
+      - pbx-monitor:/pbx-monitor:ro
+    networks:
+      - poc
+
+volumes:
+  pbx-monitor:
+  pbx-log:
+
+networks:
+  poc:
+    ipam:
+      config:
+        - subnet: 172.28.0.0/24

@@ -11,7 +11,7 @@ flowchart TB
     subgraph L5["5. Business apps"]
         CRM["CRM / Agent Desktop"]:::todo
         DASH["Supervisor dashboard / reports"]:::todo
-        DEMO["Exec demo page<br/>api/app/static/demo.html"]:::done
+        DEMO["Demo pages: customer, agent, dashboard,<br/>transactions, flow<br/>api/app/static/*.html"]:::done
         MOCK["Mock CRM screen-pop"]:::sim
     end
     subgraph L4["4. Integration layer"]
@@ -23,7 +23,7 @@ flowchart TB
     subgraph L2["2. Endpoints"]
         SOFT["Agent softphones 1001-1003"]:::sim
         SIMAG["Simulated agents 1101-1103"]:::sim
-        WEBRTC["Browser phone (WebRTC)"]:::todo
+        WEBRTC["Browser phones (SIP.js, WebRTC)<br/>agent + customer pages"]:::done
     end
     subgraph L1["1. Outside world"]
         SIMCAR["Simulated carrier + customers<br/>sim/etc"]:::sim
@@ -52,16 +52,22 @@ Core of [asterisk/etc/extensions.conf](../asterisk/etc/extensions.conf). Each bo
 
 ```mermaid
 flowchart LR
-    IN(["Inbound call<br/>from the trunk"]) --> FT["from-trunk<br/>DID 8000"]
+    IN(["Inbound call<br/>from the trunk"]) --> FT["from-trunk<br/>DID 1484"]
     FT --> IVR["ivr-main<br/>Thai welcome, wait for DTMF<br/>25 s x 3 tries"]
-    IVR -- "1" --> QC["queue-flow: q-claim"]
-    IVR -- "2" --> QP["queue-flow: q-policy"]
-    IVR -- "0" --> QG["queue-flow: q-general"]
+    IVR -- "1 accident 24h" --> Q1["queue-flow: q-accident"]
+    IVR -- "2 other incidents" --> Q2["queue-flow: q-incident"]
+    IVR -- "3 motor inquiry" --> Q3["queue-flow: q-motor"]
+    IVR -- "4 other insurance" --> Q4["queue-flow: q-insurance"]
+    IVR -- "5 buy insurance" --> Q5["queue-flow: q-sales"]
+    IVR -- "6 Muang Thai Friends Club" --> Q6["queue-flow: q-club"]
     IVR -- "9" --> IVR
     IVR -- "other key (i)" --> IVR
-    QC --> REC["sub-record<br/>MixMonitor 'b'<br/>CDR(recording)"]
-    QP --> REC
-    QG --> REC
+    Q1 --> REC["sub-record<br/>MixMonitor 'b'<br/>CDR(recording)"]
+    Q2 --> REC
+    Q3 --> REC
+    Q4 --> REC
+    Q5 --> REC
+    Q6 --> REC
     REC --> AG["Queue(): MOH while waiting,<br/>ring Agent (leastrecent)"]
     AG --> TALK(["Agent talks<br/>Hold / Transfer / Hangup"])
     AG -. "no agent" .-> NOAG["th-noagent, hangup"]
@@ -85,11 +91,11 @@ sequenceDiagram
     participant Ag as Agent
     participant A as API (AMI)
     participant C as CRM
-    Cu->>Ca: dials 8000
+    Cu->>Ca: dials 1484
     Ca->>P: SIP INVITE (trunk)
     P-->>Cu: Thai IVR prompt (RTP)
-    Cu->>P: DTMF "1"
-    P->>P: queue q-claim, start MixMonitor
+    Cu->>P: DTMF "3"
+    P->>P: queue q-motor (digit 3), start MixMonitor
     P-->>Cu: Music on Hold
     P->>Ag: ring (leastrecent member)
     Ag->>P: answer
@@ -132,22 +138,61 @@ sequenceDiagram
     P-->>A: event OutboundDialResult + CDR
 ```
 
-## 5. What the demo page does
+## 5. What the demo pages do
 
 ```mermaid
 flowchart LR
-    B["Presenter clicks<br/>in the browser"] --> D["api/app/demo.py<br/>(ARI client)"]
+    B["Browser pages<br/>customer / agent"] -- "real mode: SIP.js over WebRTC" --> P
+    B -- "simulated mode: REST" --> D["api/app/demo.py<br/>(ARI client)"]
     D -- "ARI: originate, DTMF,<br/>answer, hold, hangup" --> S["sim Asterisk<br/>fake carrier + customers<br/>+ agents 1101-1103"]
     S -- "SIP/RTP" --> P["Real PBX<br/>IVR, queue, recording, CDR"]
-    P -- "AMI events" --> A["API state<br/>(calls, KPI, history)"]
-    A --> B
+    P -- "AMI events" --> A["API state + timeline.db<br/>(calls, KPI, steps)"]
+    A -- "dashboard / transactions / flow" --> V["Browser: supervisor pages"]
     classDef sim fill:#fff3cd,stroke:#b58900,color:#000
     classDef done fill:#d4f4dd,stroke:#2e7d32,color:#000
     class S,D sim
     class P,A done
 ```
 
-Only the people are fake (customer, carrier, agents). The PBX behaviour shown (IVR, queue, hold, transfer, CDR, events) comes from the real Asterisk.
+In simulated mode only the people are fake (customer, carrier, agents). In real mode the browser is the phone: agents register to the PBX (`ws://localhost:8088/ws`, ext 12xx) and customers register to the carrier simulator (`ws://localhost:8089/ws`, numbers `0800000001` to `0800000020`) and call 1484 over the trunk. The PBX behaviour shown (IVR, queue, hold, transfer, CDR, events) always comes from the real Asterisk.
+
+### 5.1 Module map: which module talks to which, step by step
+
+Same graph as the live page `/demo/flow` (step numbers match). Solid = call path, dotted = support / data path.
+
+```mermaid
+flowchart LR
+    CUS["Customer<br/>web phone / phone"]
+    CAR["Carrier / SIP trunk<br/>sim Asterisk"]
+    PJ["PBX: PJSIP<br/>from-trunk 1484"]
+    IVR["Dialplan: IVR<br/>ivr-main, menu 1-6"]
+    Q["app_queue<br/>queue-flow"]
+    AG["Agent<br/>web phone / softphone"]
+    REC["MixMonitor<br/>.wav"]
+    CDR["CDR + queue_log"]
+    API["Integration API<br/>FastAPI, AMI, timeline"]
+    CRM["CRM / Dashboard / Transactions"]
+
+    CUS -- "1 SIP INVITE (WS :8089 / UDP)" --> CAR
+    CAR -- "2 SIP trunk UDP 5060" --> PJ
+    PJ -- "3 Answer, Playback, BackGround" --> IVR
+    IVR -- "4 DTMF 1-6, Goto queue-flow" --> Q
+    Q -- "5 Dial PJSIP/ext" --> AG
+    AG -- "6 bridge, MixMonitor(b)" --> REC
+    REC -- "7 file + CDR row" --> CDR
+    AG -- "11 REFER / BlindTransfer" --> Q
+    PJ -. "8 AMI events :5038" .-> API
+    API -. "9 REST, WS, webhook" .-> CRM
+    CDR -. "10 read history / recordings" .-> API
+    CRM -. "O1 POST /demo/outbound" .-> API
+    API -. "O2 AMI Originate agent" .-> PJ
+    PJ -. "O3 sub-outbound, Dial trunk-sim" .-> CAR
+    CAR -. "O4 INVITE customer: answer / reject / no answer" .-> CUS
+```
+
+Data stores: `timeline.db` (one row per step of every call, written from AMI events, volume `api-data`), `agents.json` (agents added at runtime, same volume), `pjsip_agents.conf` (rendered by the API into volume `pbx-dyn`, `#tryinclude`d by the PBX; adding or removing an agent = rewrite + `module reload res_pjsip.so` + `QueueAdd`/`QueueRemove` on all 6 queues).
+
+Only the people are fake in simulated mode.
 
 ## 6. Checklist
 
@@ -157,15 +202,18 @@ Only the people are fake (customer, carrier, agents). The PBX behaviour shown (I
 |---|---|
 | SIP endpoints, trunk, NAT/RTP settings | [pjsip.conf](../asterisk/etc/pjsip.conf), [rtp.conf](../asterisk/etc/rtp.conf) |
 | IVR (Thai prompts, DTMF, retry/invalid/repeat) | `ivr-main` in [extensions.conf](../asterisk/etc/extensions.conf) |
-| Queues (3 skills, leastrecent) and hold music | [queues.conf](../asterisk/etc/queues.conf), [musiconhold.conf](../asterisk/etc/musiconhold.conf) |
+| Queues (6 services of the MTI 1484 menu, leastrecent) and hold music | [queues.conf](../asterisk/etc/queues.conf), [musiconhold.conf](../asterisk/etc/musiconhold.conf) |
 | Recording (inbound and outbound) | `sub-record` + `MixMonitor(b)` |
 | CDR with custom fields (IVR choice, agent, recording, dial status) | [cdr_sqlite3_custom.conf](../asterisk/etc/cdr_sqlite3_custom.conf) |
 | Outbound with result classification | `sub-outbound`, `sub-outbound-hangup` |
 | API: agents, queues, active calls, history, CDR, recordings, events (REST + WebSocket) | [api/app](../api/app) |
 | Agent actions via API: login, logout, pause, transfer, hangup, click-to-call | [main.py](../api/app/main.py) |
 | CRM screen-pop webhook (mock) | `/mock-crm/screenpop` |
-| Exec demo page | [demo.html](../api/app/static/demo.html), [demo.py](../api/app/demo.py) |
-| Automated tests (42 checks, scenarios S0 to S7) | [tests/e2e.py](../tests/e2e.py) |
+| Demo pages: customer keypad, agent, dashboard, transactions, flow map | [static](../api/app/static), [demo.py](../api/app/demo.py) |
+| Real WebRTC softphones (SIP.js, vendored) for agent and customer | [softphone.js](../api/app/static/softphone.js), `webrtc-*` templates in [pjsip.conf](../asterisk/etc/pjsip.conf) |
+| Call timeline with transfer targets (`/transactions`) | [timeline.py](../api/app/timeline.py) |
+| Add / remove agents at runtime, concurrent customers | [agents_admin.py](../api/app/agents_admin.py), `/demo/inbound/batch` |
+| Automated tests (55 checks, scenarios S0 to S10) | [tests/e2e.py](../tests/e2e.py) |
 
 ### B. Simulated now: create or configure for production
 
@@ -186,7 +234,7 @@ Only the people are fake (customer, carrier, agents). The PBX behaviour shown (I
 
 | Gap | Note |
 |---|---|
-| Agent Desktop UI (browser softphone, wrap-up codes) | Frontend work, typically WebRTC with JsSIP or SIP.js. |
+| Production Agent Desktop (wrap-up codes, CRM panel, TURN for remote agents) | The POC agent page is a minimal SIP.js phone; production needs a real UI, TURN/ICE and TLS (`wss`). |
 | Supervisor tools: listen, whisper, barge | Asterisk supports `ChanSpy`; UI not built. |
 | Historical reports (SLA, ASA, AHT, abandon rate) | Data exists in CDR and queue_log; dashboards not built. |
 | Auto/predictive dialer, campaigns, call lists, DNC | Out of scope of the POC. |
@@ -370,7 +418,7 @@ flowchart LR
         P3["sim (Asterisk): fake carrier + agents"]
         P4["SQLite CDR + local recording folder"]
         P5["Mock CRM webhook"]
-        P6["demo.html"]
+        P6["demo pages (static/*.html)"]
     end
     subgraph PROD["Production"]
         R1["Asterisk x2 (HA)"]

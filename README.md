@@ -19,6 +19,8 @@ flowchart LR
     end
     SIP["Softphone บนเครื่อง<br/>Agent 1001-1003"] -- SIP/RTP --> PBX
     SIM -- SIP/RTP --> PBX
+    WEB["เบราว์เซอร์ (SIP.js)<br/>หน้า Customer / Agent"] -- "WebRTC (WS+SRTP)<br/>Agent→pbx:8088, Customer→sim:8089" --> PBX
+    WEB -.-> SIM
     API -- AMI 5038 --> PBX
     API -- webhook --> CRM
     APP["CRM / Agent App"] -- REST + WS --> API
@@ -29,7 +31,10 @@ flowchart LR
 | Config PBX | [asterisk/etc](asterisk/etc) (`pjsip.conf`, `extensions.conf`, `queues.conf`, `cdr_sqlite3_custom.conf`, ...) |
 | Config ตัวจำลอง | [sim/etc](sim/etc) |
 | Integration API | [api/app](api/app) |
-| หน้าจอ Demo (ไม่ต้องใช้เสียงจริง) | [api/app/static/demo.html](api/app/static/demo.html) + [api/app/demo.py](api/app/demo.py) |
+| หน้าจอ Demo (แยก 5 หน้า) | [api/app/static](api/app/static) (`customer / agent / dashboard / transactions / flow .html`) + [api/app/demo.py](api/app/demo.py) |
+| Softphone WebRTC (SIP.js) | [api/app/static/softphone.js](api/app/static/softphone.js) + [vendor/sip-0.21.2.min.js](api/app/static/vendor) (vendored, ไม่ต้องมี Node) |
+| Timeline ของแต่ละสาย (transactions) | [api/app/timeline.py](api/app/timeline.py) (SQLite `/data/timeline.db`) |
+| เพิ่ม/ลบ Agent runtime | [api/app/agents_admin.py](api/app/agents_admin.py) (เขียน `pjsip_agents.conf` ให้ PBX) |
 | E2E test | [tests/e2e.py](tests/e2e.py) |
 | ผลการประเมิน / Gap | [docs/POC-REPORT.md](docs/POC-REPORT.md) |
 | แนวคิดพื้นฐาน (ภาษาไทย) | [docs/CALL-CENTER.md](docs/CALL-CENTER.md) |
@@ -54,7 +59,7 @@ docker compose exec pbx asterisk -rvvv    # Asterisk CLI
 รัน E2E อัตโนมัติ (ใช้ agent/customer จำลองผ่าน SIP จริง):
 
 ```bash
-docker compose --profile test run --rm e2e                    # ทุก scenario S0-S7 (~3 นาที)
+docker compose --profile test run --rm e2e                    # ทุก scenario S0-S10 (~6 นาที)
 docker compose --profile test run --rm -e ONLY=s7 e2e         # เฉพาะบาง scenario เช่น ONLY=s1,s7
 ```
 
@@ -68,38 +73,53 @@ docker compose --profile test run --rm -e ONLY=s7 e2e         # เฉพาะ�
 | S5 | Click-to-call agent → agent |
 | S6 | กด IVR ผิดแล้วกดใหม่ |
 | S7 | **Outbound**: ติด / สายไม่ว่าง / ไม่รับ / ล้มเหลว / agent ยกเลิก + recording status |
+| S8 | หน้า Transactions: IVR digit, คิว, Agent, จุดที่โอนสายไป (from → to) |
+| S9 | เพิ่ม / ลบ Agent ตอนรันไทม์ (PJSIP endpoint + สมาชิกทั้ง 6 คิว) |
+| S10 | ลูกค้าโทรเข้าพร้อมกัน 3 สาย → ถึง 3 Agent คนละคน |
 
 API docs (Swagger): http://localhost:8000/docs — ทุก endpoint ต้องมี header `X-API-Key: poc-api-key`
 
 ## หน้าจอ Demo (สำหรับนำเสนอผู้บริหาร)
 
-เปิด http://localhost:8000/demo แล้วกด **"เริ่ม Demo"** มุมขวาบน (ใช้ Agent จำลอง 1101-1103 และ Carrier จำลอง ไม่ต้องมี softphone/เสียงจริง)
+เปิด http://localhost:8000/demo (หน้า hub) — แยกเป็น 5 หน้า เปิดคนละแท็บ/คนละเครื่องได้
 
-**โหมดควบคุม** (ตัวเลือกมุมขวาบน)
+| หน้า | URL | ใช้ทำอะไร |
+|---|---|---|
+| ลูกค้า | `/demo/customer` | **แป้นกดเบอร์อย่างเดียว** (เหมือนมือถือ) หมุน 1484 → ฟังเสียง IVR → กดเลือกเมนู 1-6 ระหว่างสาย; ถ้า Agent โทรออกมาจะเห็นสายเรียกเข้าและกดรับ/ปฏิเสธได้จริง |
+| Agent | `/demo/agent` | สถานะ (พร้อม / พัก / ออก), รับ/ปฏิเสธ/Hold/โอน/วางสาย, **ปุ่มโทรออก** (กรอกเบอร์หรือเลือกลูกค้าที่ออนไลน์) + chip ผลสาย |
+| Dashboard | `/demo/dashboard` | KPI, สถานะ Agent (**เพิ่ม/ลบ Agent**), คิว, สายสด, event สด, สวิตช์โหมด, ปุ่มจำลอง **ลูกค้าโทรพร้อมกัน N สาย** |
+| Transactions | `/demo/transactions` | รายการสายทั้งหมด + timeline ละเอียดทุกขั้น (ใครคุยกับใคร module ไหน → module ไหน), **โอนไปที่ไหน**, ผลโทรออก, ไฟล์ recording |
+| Flow Map | `/demo/flow` | diagram ว่าแต่ละขั้นอยู่ module ไหนและคุยกับ module ไหนอย่างไร (เส้นกะพริบสดตาม event) |
 
-- **กดเอง (ค่าเริ่มต้น)**: ผู้นำเสนอกดทีละขั้น ลูกค้าจะรอที่เมนู IVR จนกว่าจะกดปุ่มเลข, Agent จะ "เรียกเข้า" ค้างไว้จนกว่าจะกด รับสาย / ปฏิเสธ, มีแถบ "ขั้นตอนถัดไป" บอกว่าต้องกดอะไรต่อ
-- **อัตโนมัติ**: ลูกค้ากดเมนูเอง และ Agent รับสายเองหลังประมาณ 3 วินาที
+**2 โหมดการโทร** (สวิตช์บนหน้า Customer / Agent)
 
-| ส่วนของหน้าจอ | แสดง / ทำอะไรได้ |
-|---|---|
-| แถบ Flow (สายเข้า / สายออก) | สายแต่ละสายอยู่ขั้นตอนไหน: IVR → คิว → Agent รับ → Hold/โอน → วางสาย → CDR |
-| ตัวเลขสรุป | สายที่กำลังคุย, สายรอคิว, Agent ว่าง/ติดสาย/พัก, รับแล้ว/ทิ้งสาย |
-| 1) จำลองลูกค้าโทรเข้า | ปุ่ม ☎ ลูกค้าโทรเข้า → แป้นกดบนสาย IVR (1 เคลม / 2 กรมธรรม์ / 0 ทั่วไป / 7 กดผิด เพื่อโชว์เมนูพูดซ้ำ) |
-| Agent | สถานะ real-time, ปุ่ม รับสาย / ปฏิเสธ (ตอนเรียกเข้า → ปฏิเสธแล้วระบบส่งต่อ Agent ถัดไป), Hold / โอนสาย (ไป Agent อื่นหรือคิวอื่น) / วางสาย / พัก |
-| สายที่กำลังดำเนินการ | รายการสายสด + ปุ่ม "ลูกค้าวางสาย" (โชว์กรณีทิ้งสาย) |
-| 2) จำลอง Agent โทรออก | เลือกผลปลายทาง (ติด / ไม่ว่าง / ไม่รับ / ยกเลิก / ขัดข้อง / เบอร์ไม่มี) → แสดงผลการโทร |
-| 3) CRM Screen-pop | ข้อมูลที่ระบบส่ง webhook ไปยัง CRM เมื่อ Agent รับสาย |
-| ประวัติการโทร | จาก CDR (หน้านี้ไม่แสดงไฟล์เสียง เพราะสายจำลองไม่มีเสียงพูดจริง; การบันทึกเสียงจริงทดสอบผ่าน `/recordings` และ E2E) |
-| Event Real-time | event จาก Asterisk (AMI) ที่ระบบ publish ให้ระบบอื่น |
+- **จริง (WebRTC)**: เบราว์เซอร์ลงทะเบียนเป็น SIP endpoint ผ่าน SIP.js ใช้ไมค์/ลำโพงจริง — Agent เว็บ (ext 12xx) ลงทะเบียนที่ pbx `ws://localhost:8088/ws`, ลูกค้า (เบอร์ `0800000001`-`0800000020` เลือกให้อัตโนมัติ) ลงทะเบียนที่ตัวจำลอง Carrier `ws://localhost:8089/ws` แล้วโทรผ่าน trunk เข้า pbx เหมือนโทรเข้าเลขหมาย 1484 จริง
+- **จำลอง**: ไม่ใช้ไมค์ ระบบจำลองลูกค้าและ Agent 1101-1103 ผ่าน ARI; หน้า Customer เล่นไฟล์เสียง IVR จริง (`/static/ivr/*.wav`) ตาม event ของ IVR
 
-สคริปต์นำเสนอแนะนำ: กด ☎ ลูกค้าโทรเข้า → กด 1 → ชี้ที่แถบ Flow ว่าอยู่ IVR/คิว/Agent รับ (ฝั่ง CRM มี screen-pop) → Hold → โอนสายไป Agent อื่น → วางสาย → เปิดแท็บประวัติการโทร → จากนั้นสาธิตโทรออกทั้งกรณีติดและไม่ติด
+**เมนู IVR 1484 (เมืองไทยประกันภัย)** — เสียงไทยจาก neural TTS (`asterisk/tools_gen_neural.py` → `asterisk/prompts/*.wav`; สำรองด้วย espeak-ng ใน `gen-prompts.sh`) — ระบบจริงควรใช้เสียงอัดจากผู้ประกาศ
+
+| กด | บริการ | คิว |
+|---|---|---|
+| 1 | แจ้งอุบัติเหตุ (24 ชม.) | `q-accident` |
+| 2 | แจ้งเหตุอื่น ๆ | `q-incident` |
+| 3 | สอบถามประกันรถยนต์ | `q-motor` |
+| 4 | สอบถามประกันอื่น ๆ | `q-insurance` |
+| 5 | ซื้อประกัน | `q-sales` |
+| 6 | เมืองไทย เฟรนด์สคลับ | `q-club` |
+
+**โหมดควบคุม** (Dashboard): *กดเอง* — ผู้นำเสนอกดทีละขั้น (Agent จำลองเรียกเข้าค้างจนกด รับ/ปฏิเสธ); *อัตโนมัติ* — ลูกค้ากดเมนูเอง และ Agent จำลองรับสายเองหลัง ~3 วินาที (`DEMO_ANSWER_DELAY`)
+
+**Outbound แบบจริง**: Agent กรอกเบอร์ลูกค้าที่ออนไลน์ (เช่น `0800000001`) → PBX โทรหา Agent ก่อน (Agent เว็บรับสายอัตโนมัติ) → โทรออกผ่าน trunk ไปหน้าจอลูกค้า → ลูกค้ากดรับ = `CONNECTED`, ปฏิเสธ = `BUSY`, ไม่รับ 20 วินาที = `NO_ANSWER`; ถ้าไม่มีลูกค้าออนไลน์ใช้เบอร์ทดสอบ `09xxxxxxxx` ตามตารางด้านล่าง
+
+**สคริปต์นำเสนอ**: เปิด Customer + Agent + Dashboard + Transactions → ลูกค้าหมุน 1484 → ฟังเมนู → กด 3 → Agent รับสาย (Dashboard/Flow เห็นสายเดินตามขั้น) → Hold → โอนไป `q-accident` → วางสาย → เปิด Transactions ดู timeline + จุดที่โอน + ไฟล์เสียง → Agent โทรออกหาลูกค้า → ลูกค้ากดรับ/ปฏิเสธ → ดูผลสายและ recording status
 
 หมายเหตุ
 
-- เมนู IVR ใช้เสียงไทยจริง รอรับ DTMF ได้ 25 วินาที x 3 รอบ; กดระหว่างที่ยังเล่นเสียง invalid/welcome จะขึ้นข้อความให้รอ ในโหมดอัตโนมัติปรับเวลา Agent รับสายด้วย env `DEMO_ANSWER_DELAY` (ค่าเริ่มต้น 3 วินาที)
-- ตัวจำลองเป็น ARI client ของ Stasis app `sim` ได้เพียงตัวเดียวต่อครั้ง: E2E จะสั่ง `POST /demo/disable` ก่อนเริ่มโดยอัตโนมัติ (ถ้ารัน E2E ต้องกด "เริ่ม Demo" ใหม่หลังจบ)
-- Demo state อยู่ใน memory ของ API: ถ้า restart api ต้องกด "เริ่ม Demo" ใหม่
+- WebRTC ต้องเปิดหน้าจาก `localhost` (หรือ HTTPS) เพื่อให้เบราว์เซอร์อนุญาตไมค์ และ media ผ่าน Docker NAT ใช้ ICE host candidate (`HOST_MEDIA_ADDR`, port RTP 10000-10100 และ 12000-12100/udp)
+- ตัวจำลองเป็น ARI client ของ Stasis app `sim` ได้เพียงตัวเดียว: E2E จะสั่ง `POST /demo/disable` ก่อนเริ่ม (หลังรัน E2E ต้องกด "เริ่ม Demo" ใหม่)
+- State ของ demo (pool ลูกค้า, โหมด) อยู่ใน memory; timeline และ registry ของ Agent อยู่ใน volume `api-data` (อยู่รอดหลัง restart)
 - เปิดหน้าด้วย key อื่นได้ด้วย `?api_key=...` (ค่าเริ่มต้น `poc-api-key`)
+- เพิ่ม/ลบ Agent ผ่าน API: `POST /demo/agents` (`{"name":"..."}` → ext 1201-1299 + login ทุกคิว), `DELETE /demo/agents/{ext}`; รายการสาย: `GET /transactions`, `GET /transactions/{call_id}`
 
 ## ทดสอบด้วย Softphone จริง (Zoiper / Linphone / MicroSIP)
 
@@ -109,7 +129,7 @@ API docs (Swagger): http://localhost:8000/docs — ทุก endpoint ต้อ�
 | Password | poc-1001 | poc-1002 | poc-1003 |
 | Domain / Proxy | `127.0.0.1:5060` UDP | | |
 
-- โทรจาก softphone ไป `8000` = เข้า IVR (กด 1 = Claim, 2 = Policy, 0 = General)
+- โทรจาก softphone ไป `1484` = เข้า IVR (กด 1-6 ตามตารางเมนู IVR ด้านบน)
 - `*45` login เข้าทุก Queue, `*46` logout, `*47` pause, `*48` unpause
 - `600` echo test, `601` เล่นเสียงทดสอบ, `1001-1003` โทรหากัน
 - **โทรออก (outbound)**: กด `9` + เบอร์ปลายทาง (อย่างน้อย 9 หลัก) เช่น `90900000001` — ดูหัวข้อ Outbound ด้านล่าง
@@ -183,7 +203,7 @@ curl -H "$H" localhost:8000/queues                   # สมาชิก, ผ�
 curl -H "$H" localhost:8000/calls/active
 curl -H "$H" -X POST localhost:8000/agents/1001/login
 curl -H "$H" -X POST 'localhost:8000/agents/1001/pause?paused=true&reason=lunch'
-curl -H "$H" -X POST localhost:8000/agents/1001/transfer -H 'content-type: application/json' -d '{"target":"q-policy"}'
+curl -H "$H" -X POST localhost:8000/agents/1001/transfer -H 'content-type: application/json' -d '{"target":"q-motor"}'
 curl -H "$H" -X POST localhost:8000/calls/originate -H 'content-type: application/json' -d '{"agent":"1001","destination":"1002"}'   # click-to-call (เบอร์ภายนอกดูหัวข้อ Outbound)
 curl -H "$H" localhost:8000/calls/history            # 1 แถวต่อ 1 สาย (IVR, queue, agent, wait/talk, result, recording)
 curl -H "$H" 'localhost:8000/cdr?src=0811111111'     # CDR ดิบ

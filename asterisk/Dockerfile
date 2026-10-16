@@ -33,13 +33,14 @@ RUN set -eux; \
     ldconfig; \
     cd /; rm -rf /usr/src/asterisk
 
-# Thai/English IVR prompts generated with espeak-ng (POC only - replace with studio recordings)
+# Thai/English IVR prompts neural TTS wavs from prompts/ (espeak-ng fallback) (POC only - replace with studio recordings)
+COPY prompts/ /var/lib/asterisk/sounds/poc/
 COPY gen-prompts.sh /tmp/gen-prompts.sh
 RUN sh /tmp/gen-prompts.sh && rm /tmp/gen-prompts.sh
 
 COPY entrypoint.sh /entrypoint.sh
 RUN chmod +x /entrypoint.sh
 
-EXPOSE 5060/udp 5038/tcp 8088/tcp 10000-10050/udp
+EXPOSE 5060/udp 5038/tcp 8088/tcp 10000-10100/udp
 ENTRYPOINT ["/entrypoint.sh"]
 CMD ["asterisk", "-f", "-vvv"]

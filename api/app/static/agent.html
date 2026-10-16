@@ -1,0 +1,187 @@
+<!doctype html>
+<html lang="th"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>หน้าจอ Agent</title><link rel="stylesheet" href="/static/common.css">
+<style>
+  .wrap { display:grid; grid-template-columns:minmax(300px,1fr) minmax(300px,1fr); gap:14px; }
+  @media (max-width:800px) { .wrap { grid-template-columns:1fr; } }
+  .big { font:600 26px/1.2 ui-monospace,Menlo,monospace; } .state { font-size:18px; font-weight:600; }
+  .callbox { min-height:120px; border:1px dashed var(--line); border-radius:10px; padding:12px; }
+  .callbox.ring { border-color:var(--warn); background:#2a2008; animation:blink 1s infinite; } .callbox.talk { border-color:var(--ok); }
+  @keyframes blink { 50% { opacity:.6; } }
+  .chips { display:flex; gap:6px; flex-wrap:wrap; margin-top:8px; } .chips button { font-size:12px; padding:3px 9px; }
+  input.num { font:600 18px ui-monospace,Menlo,monospace; width:190px; }
+</style></head>
+<body>
+<header class="top"><h1>หน้าจอ Agent</h1>
+  <select id="sel" title="เลือก agent"></select><span id="reg" class="chip"></span><span id="nav"></span></header>
+<main>
+  <div class="wrap">
+    <div class="grid">
+      <div class="panel"><h2>สถานะ</h2>
+        <div class="row" style="justify-content:space-between"><div class="state" id="state">—</div><div class="mut" id="kind"></div></div>
+        <div class="row" style="margin-top:10px">
+          <button id="b-ready" class="ok">พร้อมรับสาย</button><button id="b-break">พัก (Break)</button><button id="b-out">ออกจากระบบคิว</button>
+        </div>
+        <div class="mut" style="margin-top:8px" id="regline"></div>
+      </div>
+      <div class="panel"><h2>โทรออก (Outbound)</h2>
+        <div class="row"><input class="num" id="out" placeholder="เบอร์ลูกค้า เช่น 0800000001" inputmode="numeric">
+          <button id="b-dial" class="primary">โทรออก</button></div>
+        <div class="mut" style="margin-top:6px">ระบบโทรหา Agent ก่อน (รับสายอัตโนมัติ) แล้วโทรต่อไปยังเบอร์ปลายทางผ่าน carrier — ลูกค้าที่เปิดหน้า "ลูกค้า" ไว้จะกดรับ/ปฏิเสธได้จริง</div>
+        <div class="chips" id="online"></div>
+        <div style="margin-top:10px" id="outres"></div>
+      </div>
+    </div>
+    <div class="panel"><h2>สายปัจจุบัน</h2>
+      <div class="callbox" id="callbox"><span class="mut">ไม่มีสาย</span></div>
+      <div class="row" style="margin-top:12px">
+        <button id="b-ans" class="ok" disabled>รับสาย</button><button id="b-rej" disabled>ปฏิเสธ</button>
+        <button id="b-hold" disabled>พักสาย</button><button id="b-mute" disabled>ปิดไมค์</button>
+        <button id="b-hang" class="danger" disabled>วางสาย</button>
+      </div>
+      <div class="row" style="margin-top:12px"><select id="tsel" disabled></select><button id="b-xfer" disabled>โอนสาย</button></div>
+      <div class="mut" style="margin-top:6px">โอนสายไปคิวอื่นหรือ Agent อื่น (SIP REFER) — ดูเส้นทางการโอนที่หน้า Transactions</div>
+    </div>
+  </div>
+  <audio id="remote" autoplay></audio>
+</main>
+<script src="/static/common.js"></script>
+<script src="/static/vendor/sip-0.21.2.min.js"></script>
+<script src="/static/softphone.js"></script>
+<script>
+$('#nav').outerHTML = nav('/demo/agent');
+const STATE_TH = { idle: 'พร้อมรับสาย', busy: 'กำลังคุยสาย', ringing: 'สายเข้า', paused: 'พักอยู่', logged_out: 'ออกจากคิว', offline: 'ออฟไลน์' };
+const RESULT_TH = { CONNECTED: 'ติดต่อได้ (ลูกค้ารับสาย)', BUSY: 'ลูกค้าไม่ว่าง / ปฏิเสธสาย', NO_ANSWER: 'ไม่มีผู้รับสาย', CANCELLED: 'Agent ยกเลิก', FAILED: 'ติดต่อไม่ได้ (เบอร์ไม่พร้อมใช้งาน)' };
+let ext = null, kind = null, phone = null, reg = 'offline', S = null, expectOut = 0, talkSince = 0, muted = false;
+const params = new URLSearchParams(location.search);
+
+const agentRow = () => S && S.agents.find(a => a.extension === ext);
+function view() {                  // unified call view for web (SIP.js) and simulated agents
+  const a = agentRow(), c = a && a.call;
+  if (kind === 'web' && phone) {
+    const s = phone.call.state;
+    return { st: s === 'incoming' ? 'incoming' : s === 'talking' ? 'talking' : s === 'hold' ? 'hold' : ['calling', 'ringing'].includes(s) ? 'dialing' : 'idle',
+             who: phone.call.remote, info: c };
+  }
+  if (a && a.sim_ringing) return { st: 'incoming', who: '', info: c };
+  if (c && ['talking', 'hold'].includes(c.stage)) return { st: c.stage, who: c.number, info: c };
+  if (c && c.direction === 'outbound') return { st: 'dialing', who: c.number, info: c };
+  return { st: 'idle', who: '', info: null };
+}
+
+function render() {
+  const a = agentRow(), v = view();
+  $('#state').textContent = a ? (STATE_TH[a.state] || a.state) : '—';
+  $('#kind').textContent = a ? (kind === 'sim' ? 'Agent จำลอง (ควบคุมผ่าน API)' : kind === 'web' ? 'Web softphone (SIP.js / WebRTC)' : 'softphone ภายนอก') : '';
+  const rc = { registered: 'ok', connecting: 'warn', failed: 'err', unregistered: 'err', offline: '' }[reg] || '';
+  $('#reg').className = 'chip ' + rc;
+  $('#reg').textContent = kind === 'web' ? `SIP: ${reg}` : (a && a.registered ? 'SIP: registered' : 'SIP: offline');
+  const box = $('#callbox'), info = v.info;
+  const q = info && info.queue_th ? `<div class="mut">คิว: ${esc(info.queue_th)}</div>` : '';
+  if (v.st === 'incoming') {
+    box.className = 'callbox ring'; box.innerHTML = `<div class="mut">สายเรียกเข้า</div><div class="big">${esc(v.who || (info && info.number) || '…')}</div>${q}`;
+  } else if (v.st === 'talking' || v.st === 'hold') {
+    if (!talkSince) talkSince = Date.now();
+    box.className = 'callbox talk';
+    box.innerHTML = `<div class="mut">${v.st === 'hold' ? 'พักสาย (Hold)' : 'กำลังสนทนา'} ${info && info.direction === 'outbound' ? '(โทรออก)' : ''}</div>
+      <div class="big">${esc(v.who || '')}</div>${q}<div class="mono" id="timer">${mmss((Date.now() - talkSince) / 1000)}</div>`;
+  } else if (v.st === 'dialing') {
+    box.className = 'callbox'; box.innerHTML = `<div class="mut">กำลังโทรออก…</div><div class="big">${esc(v.who || '')}</div>`; talkSince = 0;
+  } else { box.className = 'callbox'; box.innerHTML = '<span class="mut">ไม่มีสาย</span>'; talkSince = 0; }
+  const live = ['talking', 'hold'].includes(v.st);
+  $('#b-ans').disabled = $('#b-rej').disabled = v.st !== 'incoming';
+  $('#b-hold').disabled = !live; $('#b-hold').textContent = v.st === 'hold' ? 'กลับมาคุย' : 'พักสาย';
+  $('#b-mute').disabled = !(live && kind === 'web');
+  $('#b-hang').disabled = !(live || v.st === 'dialing');
+  $('#tsel').disabled = $('#b-xfer').disabled = !live;
+  const ok = !!a && (kind !== 'web' || reg === 'registered');
+  for (const id of ['b-ready', 'b-break', 'b-out', 'b-dial']) $('#' + id).disabled = !ok;
+}
+
+function fillTargets() {
+  const cur = $('#tsel').value;
+  const opts = Object.entries(CFG.queue_th).map(([q, t]) => `<option value="${q}">คิว ${esc(t)}</option>`);
+  for (const a of (S ? S.agents : [])) if (a.extension !== ext && a.registered) opts.push(`<option value="${a.extension}">Agent ${a.extension} (${esc(a.name)})</option>`);
+  const html = opts.join('');
+  if ($('#tsel').dataset.h !== html) { $('#tsel').innerHTML = html; $('#tsel').dataset.h = html; if (cur) $('#tsel').value = cur; }
+}
+
+async function refresh() {
+  try {
+    S = await api('/demo/state', 'GET', null, true);
+  } catch (e) { return; }
+  const list = S.agents.filter(a => a.kind !== 'softphone');
+  const sel = $('#sel'), html = list.map(a => `<option value="${a.extension}">${a.extension} — ${esc(a.name)} (${a.kind === 'sim' ? 'จำลอง' : 'web'})</option>`).join('');
+  if (sel.dataset.h !== html) { sel.innerHTML = html; sel.dataset.h = html; if (ext) sel.value = ext; }
+  if (!ext && list.length) { pick(params.get('ext') && list.some(a => a.extension === params.get('ext')) ? params.get('ext') : (list.find(a => a.kind === 'web') || list[0]).extension); }
+  fillTargets();
+  const on = await api('/demo/customers', 'GET', null, true).catch(() => []);
+  $('#online').innerHTML = on.length ? '<span class="mut">ลูกค้าออนไลน์:</span>' + on.map(c => `<button data-n="${c.number}">${c.number} (${c.mode === 'web' ? 'web' : 'จำลอง'})</button>`).join('') : '<span class="mut">ยังไม่มีลูกค้าเปิดหน้า "ลูกค้า" — เบอร์อื่นจะโทรไม่ติด</span>';
+  render();
+}
+
+async function pick(e) {
+  ext = e; $('#sel').value = e;
+  if (phone) { try { await phone.stop(); } catch (x) {} phone = null; }
+  const a = S && S.agents.find(x => x.extension === e);
+  kind = a ? a.kind : null; reg = 'offline'; muted = false;
+  history.replaceState(null, '', `?ext=${e}`);
+  if (kind === 'web') {
+    const reg_ = await api('/demo/agents/registry');
+    const me = reg_.find(x => x.extension === e);
+    if (!me) return;
+    phone = new Softphone({
+      server: `ws://${location.hostname}:${CFG.pbx_ws_port}/ws`, domain: location.hostname, user: e, password: me.password,
+      displayName: me.name, audio: $('#remote'),
+      onRegistration: async s => { reg = s; if (s === 'registered') { await api(`/agents/${e}/login`, 'POST', {}, true).catch(() => {}); } render(); },
+      onCall: ci => {
+        if (ci.state === 'incoming' && Date.now() < expectOut) { expectOut = 0; setTimeout(() => phone && phone.answer(), 300); }   // click-to-call leg
+        if (ci.error) toast('สาย: ' + ci.error, 'err');
+        render();
+      },
+    });
+    try { await phone.start(); } catch (x) { reg = 'failed'; toast('SIP: ' + x.message, 'err'); }
+  } else if (kind === 'sim') {
+    if (S && !S.demo.enabled) { await api('/demo/enable', 'POST'); toast('เปิดโหมด demo แล้ว', 'ok'); }
+  }
+  render();
+}
+
+$('#sel').onchange = () => pick($('#sel').value);
+$('#b-ready').onclick = async () => { await api(`/agents/${ext}/login`, 'POST', {}); await api(`/agents/${ext}/pause?paused=false`, 'POST').catch(() => {}); refresh(); };
+$('#b-break').onclick = async () => { await api(`/agents/${ext}/login`, 'POST', {}); await api(`/agents/${ext}/pause?paused=true&reason=break`, 'POST'); refresh(); };
+$('#b-out').onclick = async () => { await api(`/agents/${ext}/logout`, 'POST', {}); refresh(); };
+$('#b-ans').onclick = () => kind === 'web' ? phone.answer() : api(`/demo/agent/${ext}/answer`, 'POST');
+$('#b-rej').onclick = () => kind === 'web' ? phone.reject() : api(`/demo/agent/${ext}/reject`, 'POST');
+$('#b-hold').onclick = () => {
+  const on = view().st !== 'hold';
+  if (kind === 'web') phone.hold(on).then(render); else api(`/demo/agent/${ext}/hold?on=${on}`, 'POST');
+};
+$('#b-mute').onclick = () => { muted = !muted; phone.mute(muted); $('#b-mute').textContent = muted ? 'เปิดไมค์' : 'ปิดไมค์'; };
+$('#b-hang').onclick = () => kind === 'web' ? phone.hangup() : api(`/agents/${ext}/hangup`, 'POST').catch(() => {});
+$('#b-xfer').onclick = async () => {
+  const t = $('#tsel').value; if (!t) return;
+  try {
+    if (kind === 'web') await phone.transfer(t); else await api(`/agents/${ext}/transfer`, 'POST', { target: t });
+    toast(`โอนสายไป ${t} แล้ว`, 'ok');
+  } catch (e) { toast('โอนสายไม่สำเร็จ: ' + e.message, 'err'); }
+};
+$('#b-dial').onclick = async () => {
+  const n = $('#out').value.trim();
+  if (!/^\d{3,15}$/.test(n)) { toast('กรอกเบอร์เป็นตัวเลข', 'err'); return; }
+  $('#outres').innerHTML = '<span class="chip warn">กำลังโทรออก…</span>';
+  expectOut = Date.now() + 20000;
+  try { await api('/demo/outbound', 'POST', { agent: ext, number: n }); } catch (e) { $('#outres').innerHTML = ''; }
+};
+$('#online').onclick = e => { const b = e.target.closest('button'); if (b) $('#out').value = b.dataset.n; };
+$('#out').addEventListener('keydown', e => { if (e.key === 'Enter') $('#b-dial').click(); });
+
+watchEvents(e => {
+  if (e.event === 'OutboundDialResult' && e.agent === ext) {
+    const cls = e.result === 'CONNECTED' ? 'ok' : 'warn';
+    $('#outres').innerHTML = `<span class="chip ${cls}">${esc(e.dialed)} → ${esc(RESULT_TH[e.result] || e.result)}</span>`;
+  }
+});
+setInterval(() => { const t = $('#timer'); if (t && talkSince) t.textContent = mmss((Date.now() - talkSince) / 1000); }, 500);
+loadConfig().then(() => { refresh(); setInterval(refresh, 1500); });
+</script></body></html>

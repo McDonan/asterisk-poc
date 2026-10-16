@@ -1,0 +1,178 @@
+<!doctype html>
+<html lang="th"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>หน้าจอลูกค้า - โทร 1484</title><link rel="stylesheet" href="/static/common.css">
+<style>
+  .phone { width:330px; margin:22px auto; padding:18px; background:var(--panel); border:1px solid var(--line); border-radius:26px; }
+  .screen { background:#020617; border-radius:12px; padding:12px 14px; min-height:96px; text-align:center; }
+  .screen .num { font:600 28px/1.3 ui-monospace,Menlo,monospace; min-height:38px; letter-spacing:.04em; word-break:break-all; }
+  .screen .st { font-size:13px; color:var(--mut); min-height:20px; } .screen .st b { color:var(--fg); }
+  .keys { display:grid; grid-template-columns:repeat(3,1fr); gap:10px; margin:16px 0 12px; }
+  .keys button { font-size:22px; padding:13px 0; border-radius:14px; } .keys button small { display:block; font-size:9px; color:var(--mut); letter-spacing:.12em; }
+  .actions { display:grid; grid-template-columns:1fr 1fr 56px; gap:10px; }
+  .actions button { padding:13px 0; font-size:15px; border-radius:14px; }
+  .top2 { display:flex; justify-content:space-between; align-items:center; font-size:12px; color:var(--mut); margin-bottom:10px; }
+  .tabs { display:flex; gap:6px; justify-content:center; margin:6px auto 0; } .tabs button.on { background:var(--accent); border-color:var(--accent); }
+  .hint { text-align:center; color:var(--mut); font-size:12px; max-width:360px; margin:10px auto; }
+</style></head>
+<body>
+<header class="top"><h1>หน้าจอลูกค้า</h1><span class="mut">โทรศัพท์ลูกค้า — กดโทร 1484 แล้วเลือกเมนู IVR</span><span id="nav"></span></header>
+<main>
+  <div class="tabs">
+    <button id="m-real" class="on" title="softphone จริงในเบราว์เซอร์ (SIP.js, ต้องอนุญาตไมโครโฟน)">โทรจริง (WebRTC)</button>
+    <button id="m-sim" title="จำลอง: ไม่ใช้ไมค์ เสียง IVR เล่นจากไฟล์เสียงในเบราว์เซอร์">จำลอง</button>
+  </div>
+  <div class="phone">
+    <div class="top2"><span id="who">เบอร์ —</span><span id="reg"><span class="dot"></span>กำลังเชื่อมต่อ</span></div>
+    <div class="screen"><div class="num" id="num"></div><div class="st" id="st"></div></div>
+    <div class="keys" id="keys"></div>
+    <div class="actions">
+      <button class="ok" id="call">โทร</button>
+      <button class="danger" id="hang" disabled>วางสาย</button>
+      <button id="del" title="ลบ">⌫</button>
+    </div>
+  </div>
+  <div class="hint" id="hint"></div>
+  <audio id="remote" autoplay></audio>
+</main>
+<script src="/static/common.js"></script>
+<script src="/static/vendor/sip-0.21.2.min.js"></script>
+<script src="/static/softphone.js"></script>
+<script>
+$('#nav').outerHTML = nav('/demo/customer');
+const KEYS = [['1',''],['2','ABC'],['3','DEF'],['4','GHI'],['5','JKL'],['6','MNO'],['7','PQRS'],['8','TUV'],['9','WXYZ'],['*',''],['0','+'],['#','']];
+$('#keys').innerHTML = KEYS.map(([k, s]) => `<button data-k="${k}">${k}<small>${s || '&nbsp;'}</small></button>`).join('');
+const PROMPT = { 'th-welcome': 'ข้อความต้อนรับ', 'th-menu': 'เมนู: กด 1-6', 'th-invalid': 'กดผิด', 'th-goodbye': 'ขอบคุณ', 'th-holdon': 'กรุณารอสักครู่', 'th-noagent': 'ไม่มีเจ้าหน้าที่' };
+const STAGE = { ivr: 'ฟังเมนู IVR', queue: 'รอเจ้าหน้าที่ (เข้าคิว)', talking: 'กำลังสนทนา', hold: 'เจ้าหน้าที่พักสาย' };
+const player = new IvrPlayer();
+let mode = 'real', number = null, phone = null, hbT = null, pollT = null, reg = 'connecting';
+let typed = '', lastPrompt = '', remoteCall = null, incoming = null, simDialing = 0, snapCall = null, gen = 0;
+
+function inCall() {
+  if (mode === 'real') return phone && ['calling', 'ringing', 'talking', 'hold'].includes(phone.call.state);
+  return !!snapCall || Date.now() < simDialing;
+}
+function ringingIn() { return mode === 'real' ? (phone && phone.call.state === 'incoming') : !!incoming; }
+
+function render() {
+  const ringing = ringingIn(), call = inCall();
+  let num = typed, st = '';
+  if (ringing) { num = mode === 'real' ? phone.call.remote : incoming.from; st = '<b>สายเรียกเข้า</b> จากศูนย์บริการ'; }
+  else if (call) {
+    num = mode === 'real' ? phone.call.remote : '1484';
+    const stg = snapCall ? STAGE[snapCall.stage] : (mode === 'real' && phone.call.state === 'ringing' ? 'กำลังโทร…' : 'กำลังเชื่อมต่อ…');
+    st = `<b>${esc(stg || '')}</b>` + (snapCall && snapCall.queue_th && snapCall.stage === 'queue' ? ` — ${esc(snapCall.queue_th)}` : '')
+      + (snapCall && snapCall.agent && snapCall.stage !== 'ivr' ? ` (Agent ${esc(snapCall.agent)})` : '');
+    if (lastPrompt && (!snapCall || snapCall.stage === 'ivr' || snapCall.stage === 'queue')) st += `<br>♪ ${esc(PROMPT[lastPrompt] || lastPrompt)}`;
+  } else if (!typed) st = 'กดเบอร์ 1484 แล้วกด โทร';
+  $('#num').textContent = num;
+  $('#st').innerHTML = st;
+  $('#call').disabled = !ringing && (call || !typed);
+  $('#call').textContent = ringing ? 'รับสาย' : 'โทร';
+  $('#hang').disabled = !(ringing || call);
+  $('#hang').textContent = ringing ? 'ปฏิเสธ' : 'วางสาย';
+  $('#del').disabled = call || ringing;
+  const dot = { registered: 'ok', connecting: 'warn', failed: 'err', unregistered: 'err', offline: '' }[reg] || '';
+  $('#reg').innerHTML = `<span class="dot ${dot}"></span>${mode === 'real' ? 'SIP ' + reg : 'โหมดจำลอง'}`;
+}
+
+async function begin(newMode) {
+  const g = ++gen;
+  await end();
+  mode = newMode; typed = ''; lastPrompt = ''; snapCall = null; incoming = null; reg = 'connecting';
+  $('#m-real').classList.toggle('on', mode === 'real'); $('#m-sim').classList.toggle('on', mode === 'sim');
+  $('#hint').textContent = mode === 'real'
+    ? 'โหมดโทรจริง: เบราว์เซอร์ลงทะเบียนเป็น softphone (SIP.js / WebRTC) ที่ carrier จำลอง ต้องอนุญาตไมโครโฟน — ใช้ได้เฉพาะ localhost/https'
+    : 'โหมดจำลอง: ไม่ต้องใช้ไมโครโฟน เสียง IVR เล่นจากไฟล์เสียงชุดเดียวกับที่ PBX ใช้';
+  render();
+  const cfg = await loadConfig();
+  let c;
+  try { c = await api('/demo/customers/claim', 'POST', { mode: mode === 'real' ? 'web' : 'sim' }); }
+  catch (e) { return; }
+  if (g !== gen) return;
+  number = c.number;
+  $('#who').textContent = `เบอร์ของคุณ ${number}`;
+  hbT = setInterval(() => api(`/demo/customers/${number}/heartbeat?mode=${mode === 'real' ? 'web' : 'sim'}`, 'POST', null, true).catch(() => {}), 5000);
+  if (mode === 'real') {
+    phone = new Softphone({
+      server: `ws://${location.hostname}:${cfg.sim_ws_port}/ws`, domain: location.hostname, user: number, password: c.password,
+      displayName: `Customer ${number}`, audio: $('#remote'),
+      onRegistration: s => { reg = s; render(); },
+      onCall: ci => { if (ci.error) toast('สายไม่สำเร็จ: ' + ci.error, 'err'); render(); },
+    });
+    try { await phone.start(); } catch (e) { reg = 'failed'; toast('เชื่อมต่อ SIP ไม่ได้: ' + e.message, 'err'); }
+  } else {
+    reg = 'registered';
+    const st = await api('/demo/state', 'GET', null, true).catch(() => null);
+    if (st && !st.demo.enabled) { await api('/demo/enable', 'POST'); toast('เปิดโหมด demo (agent จำลอง) แล้ว', 'ok'); }
+  }
+  pollT = setInterval(poll, 1000);
+  render();
+}
+
+async function end() {
+  clearInterval(hbT); clearInterval(pollT); player.stop();
+  if (phone) { try { await phone.stop(); } catch (e) {} phone = null; }
+  if (number) { api(`/demo/customers/${number}/release`, 'POST', null, true).catch(() => {}); number = null; }
+}
+
+async function poll() {
+  if (!number) return;
+  try {
+    const s = await api(`/demo/customer/${number}`, 'GET', null, true);
+    snapCall = s.call; incoming = mode === 'sim' ? s.incoming : null;
+    if (snapCall && snapCall.stage !== 'ivr' && snapCall.stage !== 'queue') player.stop();
+    if (!snapCall && !inCall()) lastPrompt = '';
+    render();
+  } catch (e) { /* demo off */ }
+}
+
+watchEvents(e => {
+  if (mode !== 'sim' || !number || e.event !== 'IvrPrompt' || e.CallerIDNum !== number) return;
+  lastPrompt = (e.Prompt || '').trim(); player.play(lastPrompt); render();
+});
+
+$('#keys').addEventListener('click', async ev => {
+  const b = ev.target.closest('button'); if (!b) return;
+  const k = b.dataset.k;
+  if (inCall()) {                                   // during a call the keypad sends DTMF (IVR menu)
+    if (mode === 'real') { if (!phone.dtmf(k)) toast('ยังส่ง DTMF ไม่ได้', 'err'); }
+    else {
+      if (/[0-9]/.test(k)) api(`/demo/customer/${number}/press`, 'POST', { digit: k }, true).catch(e => toast('ตอนนี้ IVR ยังไม่รับตัวเลข: ' + e.message));
+    }
+    if (/[0-9]/.test(k) && mode === 'sim') player.stop();
+  } else if (!ringingIn() && typed.length < 15) { typed += k; render(); }
+});
+$('#del').onclick = () => { typed = typed.slice(0, -1); render(); };
+
+$('#call').onclick = async () => {
+  if (ringingIn()) {
+    if (mode === 'real') phone.answer(); else api(`/demo/customer/${number}/answer`, 'POST').catch(() => {});
+    return;
+  }
+  if (typed !== '1484') { toast('ลูกค้าโทรได้เฉพาะเบอร์ 1484 (ศูนย์บริการลูกค้า MTI)', 'err'); return; }
+  try {
+    if (mode === 'real') await phone.dial('1484');
+    else { simDialing = Date.now() + 5000; render(); await api('/demo/inbound', 'POST', { service: null, caller: number }); }
+  } catch (e) { simDialing = 0; if (mode === 'real') toast('โทรไม่ได้: ' + e.message, 'err'); }
+  typed = ''; render();
+};
+$('#hang').onclick = async () => {
+  if (ringingIn()) {
+    if (mode === 'real') phone.reject(); else api(`/demo/customer/${number}/reject`, 'POST').catch(() => {});
+    return;
+  }
+  player.stop();
+  if (mode === 'real') phone.hangup().catch(() => {});
+  else api(`/demo/customer/${number}/hangup`, 'POST', null, true).catch(() => {});
+  simDialing = 0;
+};
+$('#m-real').onclick = () => begin('real');
+$('#m-sim').onclick = () => begin('sim');
+addEventListener('pagehide', () => { if (number) navigator.sendBeacon(`/demo/customers/${number}/release?api_key=${CFG ? CFG.api_key : ''}`); });
+document.addEventListener('keydown', ev => {
+  if (/^[0-9*#]$/.test(ev.key)) { const b = document.querySelector(`[data-k="${CSS.escape(ev.key)}"]`); b && b.click(); }
+  else if (ev.key === 'Backspace') $('#del').click();
+  else if (ev.key === 'Enter') $('#call').click();
+});
+begin('real');
+</script></body></html>

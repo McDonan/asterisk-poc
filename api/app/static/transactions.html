@@ -1,0 +1,71 @@
+<!doctype html>
+<html lang="th"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Transactions - ไทม์ไลน์ของสาย</title><link rel="stylesheet" href="/static/common.css">
+<style>
+  .cols { display:grid; grid-template-columns:minmax(560px,3fr) 2fr; gap:14px; } @media (max-width:1100px) { .cols { grid-template-columns:1fr; } }
+  .tl { position:relative; margin-left:8px; border-left:2px solid var(--line); padding-left:16px; }
+  .step { position:relative; padding:0 0 12px; } .step::before { content:""; position:absolute; left:-23px; top:5px; width:10px; height:10px; border-radius:50%; background:var(--accent); }
+  .step.transfer::before { background:var(--warn); width:14px; height:14px; left:-25px; } .step.agent_answer::before { background:var(--ok); } .step.abandon::before, .step.call_end::before { background:var(--err); }
+  .step .m { font-size:12px; color:var(--mut); } .step .arrow { font-size:11px; padding:1px 7px; border-radius:6px; background:var(--panel2); border:1px solid var(--line); }
+  .step.transfer .txt { color:#fcd34d; font-weight:600; }
+  .xfer { color:#fcd34d; }
+</style></head>
+<body>
+<header class="top"><h1>Transactions</h1><span class="mut">เส้นทางของแต่ละสายแบบละเอียด: IVR → คิว → Agent → โอนสายไปไหน → จบสาย</span><span id="nav"></span></header>
+<main>
+  <div class="row" style="margin-bottom:12px"><select id="dir"><option value="">ทุกทิศทาง</option><option value="inbound">สายเข้า</option><option value="outbound">สายออก</option></select>
+    <input id="q" placeholder="ค้นหา: เบอร์ / agent / คิว"><button id="reload">รีเฟรช</button><span class="mut" id="cnt"></span></div>
+  <div class="cols">
+    <div class="panel" style="overflow:auto"><table id="list"></table></div>
+    <div class="panel" id="detail"><span class="mut">เลือกสายจากรายการเพื่อดูไทม์ไลน์</span></div>
+  </div>
+</main>
+<script src="/static/common.js"></script>
+<script>
+$('#nav').outerHTML = nav('/demo/transactions');
+let sel = null, CALLS = [], LAST_DETAIL = '';
+const QTH = () => (CFG ? CFG.queue_th : {});
+const RES = { ANSWERED: ['ok', 'รับสายแล้ว'], TALKING: ['info', 'กำลังคุย'], ABANDONED: ['warn', 'ลูกค้าทิ้งสาย'], NO_AGENT: ['warn', 'ไม่มี agent'], IN_PROGRESS: ['info', 'กำลังดำเนินการ'],
+  CONNECTED: ['ok', 'ติดต่อได้'], BUSY: ['warn', 'ไม่ว่าง'], NO_ANSWER: ['warn', 'ไม่รับสาย'], CANCELLED: ['warn', 'ยกเลิก'], FAILED: ['err', 'ติดต่อไม่ได้'], UNKNOWN: ['', 'ไม่ทราบ'] };
+const chip = r => { const [c, t] = RES[r] || ['', r]; return `<span class="chip ${c}">${t}</span>`; };
+
+async function load() {
+  const p = new URLSearchParams({ limit: 80 }); if ($('#dir').value) p.set('direction', $('#dir').value); if ($('#q').value.trim()) p.set('q', $('#q').value.trim());
+  try { CALLS = await api('/transactions?' + p, 'GET', null, true); } catch (e) { return; }
+  $('#cnt').textContent = `${CALLS.length} สาย`;
+  $('#list').innerHTML = '<tr><th>เวลา</th><th></th><th>ลูกค้า/ปลายทาง</th><th>กด</th><th>คิว</th><th>Agent</th><th>การโอนสาย</th><th>ผล</th><th>นาน</th></tr>' + CALLS.map(c => `
+    <tr class="click ${c.call_id === sel ? 'sel' : ''}" data-id="${c.call_id}"><td>${fmtTime(c.start)}</td><td>${c.direction === 'inbound' ? '←' : '→'}</td>
+    <td class="mono">${esc(c.direction === 'inbound' ? c.caller : c.dialed || '')}</td><td>${esc(c.ivr_digits.join(','))}</td>
+    <td>${c.queues.map(q => esc(QTH()[q] || q)).join(' → ')}</td><td>${esc(c.agents.join(', ') || (c.direction === 'outbound' ? c.caller : ''))}</td>
+    <td class="xfer">${c.transfers.map(t => `${esc(t.from)} → ${esc(t.type === 'queue' ? (t.to_label || t.to) : t.to)}`).join('<br>')}</td>
+    <td>${chip(c.result)}</td><td>${mmss(c.duration)}</td></tr>`).join('');
+  if (sel) show(sel, true);
+}
+
+async function show(id, keep) {
+  sel = id;
+  if (!keep) document.querySelectorAll('#list tr').forEach(r => r.classList.toggle('sel', r.dataset.id === id));
+  let t; try { t = await api('/transactions/' + id, 'GET', null, true); } catch (e) { return; }
+  const s = t.summary, cdr = t.cdr;
+  const rec = cdr && cdr.recording_status === 'recorded' ? `<audio controls style="width:100%;margin-top:8px" src="/recordings/${encodeURI(cdr.recording)}?api_key=${CFG.api_key}"></audio>` : '';
+  const html = `
+    <h2>สาย ${esc(id)}</h2>
+    <div class="row">${chip(s.result)} <span class="chip">${s.direction === 'inbound' ? 'สายเข้า' : 'สายออก'}</span><span class="mono">${esc(s.direction === 'inbound' ? s.caller : (s.dialed || ''))}</span>
+      <span class="mut">${fmtDateTime(s.start)} · ${mmss(s.duration)}</span></div>
+    ${s.transfers.length ? `<div class="xfer" style="margin:8px 0">โอนสาย: ${s.transfers.map(x => `Agent ${esc(x.from)} → ${esc(x.type === 'queue' ? 'คิว ' + (x.to_label || x.to) : 'Agent ' + x.to)}`).join(', ')}</div>` : ''}
+    ${cdr ? `<div class="mut" style="margin:6px 0">CDR: ${esc(cdr.disposition || '')} · รอ/โทร ${cdr.ring_seconds || 0}s · คุย ${cdr.talk_seconds}s · บันทึกเสียง: ${cdr.recording_status === 'recorded' ? 'มี' : 'ไม่มี'}</div>${rec}` : '<div class="mut" style="margin:6px 0">CDR ยังไม่พร้อม (สายยังไม่จบ)</div>'}
+    <div class="tl" style="margin-top:14px">${t.steps.map(st => `
+      <div class="step ${st.kind}"><div class="m">+${st.t}s · ${fmtTime(st.ts)} <span class="arrow">${esc(st.from_name)} → ${esc(st.to_name)}</span></div>
+      <div class="txt">${esc(st.text)}</div></div>`).join('')}</div>`;
+  // the list auto-refreshes every 3 s: only touch the DOM when something changed,
+  // otherwise the <audio> player is recreated and playback restarts/stutters
+  if (html === LAST_DETAIL && $('#detail').querySelector('h2')) return;
+  LAST_DETAIL = html;
+  $('#detail').innerHTML = html;
+}
+
+$('#list').onclick = e => { const r = e.target.closest('tr[data-id]'); if (r) show(r.dataset.id); };
+$('#dir').onchange = $('#reload').onclick = load;
+$('#q').addEventListener('keydown', e => { if (e.key === 'Enter') load(); });
+loadConfig().then(() => { load(); setInterval(load, 3000); });
+</script></body></html>

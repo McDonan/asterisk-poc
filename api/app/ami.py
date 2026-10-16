@@ -19,6 +19,7 @@ INTERESTING = {
     "AgentCalled", "AgentConnect", "AgentComplete", "AgentRingNoAnswer", "AgentDump",
     "QueueMemberAdded", "QueueMemberRemoved", "QueueMemberPause", "QueueMemberStatus",
     "ContactStatus", "Cdr",
+    "UserEvent",          # dialplan UserEvent(IvrPrompt,Prompt: ...) -> converted to IvrPrompt below
 }
 NOISE_KEYS = {"Privilege", "ActionID", "SystemName", "Uniqueid2"}
 
@@ -36,6 +37,7 @@ class AmiService:
         self._http = httpx.AsyncClient(timeout=5)
         self.held: set[str] = set()              # channels currently on hold (demo page)
         self._trunk_dials: dict[str, str] = {}   # carrier-leg uniqueid -> dialed number
+        self.listeners: list = []                # callables(evt) fed with every published event (timeline recorder)
 
     # ---------- lifecycle ----------
     async def start(self) -> None:
@@ -77,6 +79,11 @@ class AmiService:
             return
         evt = {"ts": datetime.now(timezone.utc).isoformat(timespec="milliseconds"), "event": name}
         evt.update({k: v for k, v in dict(message).items() if k not in NOISE_KEYS and k != "Event"})
+        if name == "UserEvent":
+            # AMI eventfilter hides Newexten, so the dialplan announces each IVR prompt with a UserEvent
+            if evt.get("UserEvent") != "IvrPrompt":
+                return
+            evt["event"] = name = "IvrPrompt"
         self._publish(evt)
         if name == "Hold":
             self.held.add(evt.get("Channel", ""))
@@ -91,6 +98,11 @@ class AmiService:
 
     def _publish(self, evt: dict) -> None:
         self.recent.append(evt)
+        for fn in self.listeners:
+            try:
+                fn(evt)
+            except Exception:
+                log.exception("event listener failed")
         for q in list(self.subscribers):
             if not q.full():
                 q.put_nowait(evt)

@@ -1,5 +1,9 @@
-"""Demo mode: drives the simulated agents / carrier (the "sim" Asterisk, via ARI) from the API,
-so the demo page can run complete call scenarios with buttons only (no real phones needed).
+"""Demo mode: simulated carrier / customers / agents (the "sim" Asterisk, driven over ARI) plus the
+aggregated state used by the demo pages.
+
+Real calls do not need any of this: customers and agents can use the browser softphone (SIP.js, WebRTC).
+The simulation exists so that every scenario can also run with buttons only (no microphone), for automated
+tests, and for load (N concurrent customers).
 
 Only one ARI client may serve the Stasis app "sim" at a time -> tests/e2e.py calls POST /demo/disable first.
 """
@@ -9,6 +13,7 @@ import logging
 import os
 import random
 import re
+import time
 from pathlib import Path
 
 import httpx
@@ -18,22 +23,25 @@ from fastapi.responses import FileResponse
 from pydantic import BaseModel
 
 from . import config
+from .labels import IVR_MENU, QUEUE_TH, SERVICE_DIGIT
 
 log = logging.getLogger("demo")
 
 SIM_HOST = os.getenv("SIM_HOST", "sim")
 SIM_PORT = int(os.getenv("SIM_PORT", "8088"))
 ARI_USER, ARI_PASS = "poc", "poc-ari-secret"
-AGENTS = ["1101", "1102", "1103"]
-IVR_DIGIT = {"claim": "1", "policy": "2", "general": "0"}
-# outcome chosen by the simulated carrier from the last digit of the dialed number
+AGENTS = ["1101", "1102", "1103"]                      # simulated agents (answered through ARI)
+IVR_DIGIT = SERVICE_DIGIT                              # accident=1 ... club=6
+CUSTOMER_POOL = int(os.getenv("CUSTOMER_POOL", "20"))
+POOL = [f"0800000{n:03d}" for n in range(1, CUSTOMER_POOL + 1)]   # numbers a customer can use (web phone or simulated)
+POOL_STALE = 20                                        # seconds without heartbeat before a claimed number is free again
+# magic numbers for regression tests: the carrier chooses the outcome from the last digit (not shown in the UI)
 OUTBOUND_NUMBER = {
     "connected": "0900000001", "remote_hangup": "0900000006", "busy": "0900000002",
     "no_answer": "0900000003", "cancel": "0900000003", "congestion": "0900000004", "invalid": "0900000005",
 }
 ANSWER_DELAY = float(os.getenv("DEMO_ANSWER_DELAY", "3"))     # seconds a sim agent "takes" to pick up
 AGENT_CHAN = re.compile(r"^PJSIP/(\d{4})-")
-QUEUE_TH = {"q-claim": "เคลมประกัน", "q-policy": "กรมธรรม์", "q-general": "ทั่วไป"}
 
 
 class Sim:
@@ -46,12 +54,17 @@ class Sim:
         self.agent_ch: dict[str, str] = {}      # ext -> sim channel id of the call currently on that agent
         self.answered: set[str] = set()
         self.auto = False                       # False = manual: the presenter presses keys / answers calls
-        self.quick: set[str] = set()            # (auto mode) agents that answer a click-to-call leg immediately
-        self.customers: dict[str, str] = {}     # caller number -> sim channel id
+        self.quick: set[str] = set()            # agents that answer a click-to-call leg immediately (also in manual mode)
+        self.customers: dict[str, str] = {}     # caller number -> sim channel of its (simulated) inbound call
         self.pressed: set[str] = set()          # callers that already chose an IVR service
         self.talking: set[str] = set()          # customer channels already playing speech
+        self.menu_ready: set[str] = set()       # callers whose IVR menu is listening (from IvrPrompt events)
+        self.pool: dict[str, dict] = {}         # claimed customer numbers: {"mode", "last"}
+        self.incoming: dict[str, dict] = {}     # simulated customer number -> ringing outbound call {"ch","from","ts"}
+        self.cust_out: dict[str, str] = {}      # simulated customer number -> answered outbound call channel
         self._tasks: set[asyncio.Task] = set()
         self._seq = 0
+        ami.listeners.append(self._on_ami)
 
     @property
     def enabled(self) -> bool:
@@ -69,15 +82,28 @@ class Sim:
             except (asyncio.CancelledError, Exception):
                 pass
         self.task, self.connected = None, False
-        for s in (self.alive, self.answered, self.quick, self.pressed, self.talking):
+        for s in (self.alive, self.answered, self.quick, self.pressed, self.talking, self.menu_ready):
             s.clear()
-        self.agent_ch.clear()
-        self.customers.clear()
+        for d in (self.agent_ch, self.customers, self.incoming, self.cust_out):
+            d.clear()
 
     def _spawn(self, coro) -> None:
         t = asyncio.create_task(coro)
         self._tasks.add(t)
         t.add_done_callback(self._tasks.discard)
+
+    # ---------- AMI events: which callers are listening to the IVR menu ----------
+    def _on_ami(self, e: dict) -> None:
+        n, who = e["event"], e.get("CallerIDNum")
+        if n == "IvrPrompt":
+            if e.get("Prompt", "").strip() == "th-menu":
+                self.menu_ready.add(who)
+            else:
+                self.menu_ready.discard(who)
+        elif n in ("QueueCallerJoin", "Hangup"):
+            self.menu_ready.discard(who)
+        elif n == "DTMFEnd" and e.get("Direction") == "Received":
+            self.menu_ready.discard(who)
 
     # ---------- ARI plumbing ----------
     async def _run(self) -> None:
@@ -103,6 +129,8 @@ class Sim:
                 self._spawn(self._agent_flow(ch, args[1]))
             elif args[:1] == ["customer"]:
                 self._spawn(self._customer_flow(ch, args[1], ev["channel"]["caller"]["number"]))
+            elif args[:1] == ["customer_out"]:
+                self._spawn(self._customer_out_flow(ch, args[1], ev["channel"]["caller"]["number"]))
         elif t in ("ChannelDestroyed", "StasisEnd"):
             ch = ev["channel"]["id"]
             self.alive.discard(ch)
@@ -115,6 +143,12 @@ class Sim:
                 if c == ch:
                     del self.customers[num]
                     self.pressed.discard(num)
+            for num, c in list(self.cust_out.items()):
+                if c == ch:
+                    del self.cust_out[num]
+            for num, inc in list(self.incoming.items()):
+                if inc["ch"] == ch:
+                    del self.incoming[num]
 
     async def ari(self, method: str, path: str, **params):
         r = await self.http.request(method, path, params=params)
@@ -128,14 +162,14 @@ class Sim:
         except Exception:
             pass
 
-    # ---------- simulated behaviours ----------
+    # ---------- simulated agents ----------
     async def _agent_flow(self, ch: str, ext: str) -> None:
         self.alive.add(ch)
         self.agent_ch[ext] = ch
         self.answered.discard(ext)
         quick = ext in self.quick
         self.quick.discard(ext)
-        if not self.auto:
+        if not self.auto and not quick:
             return                              # manual: wait for POST /demo/agent/{ext}/answer
         await asyncio.sleep(1.0 if quick else ANSWER_DELAY)
         if ch not in self.alive or ext in self.answered:
@@ -163,19 +197,16 @@ class Sim:
         ch = self.agent_ch.get(ext)
         return bool(ch) and ch in self.alive and ext not in self.answered
 
-    async def _ivr_ready(self, caller: str) -> bool:
-        rows = await self.ami.events_list({"Action": "CoreShowChannels"})
-        return any(r.get("CallerIDNum") == caller and (r.get("Application") or "").lower() in ("background", "waitexten")
-                   for r in rows)
-
+    # ---------- simulated customers: inbound (customer dials 1484) ----------
     async def press(self, caller: str, digit: str) -> None:
         ch = self.customers.get(caller)
         if not ch or ch not in self.alive:
             raise HTTPException(409, f"no active customer call {caller}")
-        if not await self._ivr_ready(caller):
+        if caller not in self.menu_ready:
             raise HTTPException(409, "IVR menu is not listening yet")
+        await asyncio.sleep(0.3)                  # Background() starts right after the prompt event
         await self.ari("POST", f"/channels/{ch}/dtmf", dtmf=digit)
-        if digit in IVR_DIGIT.values():
+        if digit in IVR_MENU:
             self.pressed.add(caller)
         if ch not in self.talking:
             self.talking.add(ch)
@@ -188,7 +219,7 @@ class Sim:
         for _ in range(100):                      # wait (<= 30 s) until the IVR menu is listening
             if ch not in self.alive:
                 return
-            if await self._ivr_ready(caller):
+            if caller in self.menu_ready:
                 break
             await asyncio.sleep(0.3)
         else:
@@ -199,7 +230,6 @@ class Sim:
         except Exception:
             return
 
-    # ---------- commands ----------
     async def inbound(self, service: str | None, caller: str | None) -> str:
         caller = caller or "08" + "".join(random.choices("0123456789", k=8))
         if caller in self.customers:
@@ -208,13 +238,49 @@ class Sim:
         ch = f"demo-cust-{caller}-{self._seq}"
         self.customers[caller] = ch
         try:
-            await self.ari("POST", "/channels", endpoint="PJSIP/8000@pbx", app="sim", appArgs=f"customer,{IVR_DIGIT[service] if service else '-'}",
+            await self.ari("POST", "/channels", endpoint="PJSIP/1484@pbx", app="sim",
+                           appArgs=f"customer,{IVR_DIGIT[service] if service else '-'}",
                            callerId=caller, channelId=ch, timeout=30)
         except Exception as exc:
             self.customers.pop(caller, None)
             raise HTTPException(502, f"sim ARI error: {exc}")
         return caller
 
+    # ---------- simulated customers: outbound (the call center dials the customer) ----------
+    def sim_online(self, number: str) -> bool:
+        p = self.pool.get(number)
+        return bool(p and p["mode"] == "sim" and time.time() - p["last"] < POOL_STALE)
+
+    async def _customer_out_flow(self, ch: str, number: str, caller: str) -> None:
+        """The carrier handed an outbound call for a customer number that has no web phone registered."""
+        self.alive.add(ch)
+        if not self.sim_online(number) or number in self.incoming:
+            try:                                  # nobody there -> back to the dialplan: Hangup(1) = unallocated
+                await self.ari("POST", f"/channels/{ch}/continue")
+            except Exception:
+                pass
+            return
+        self.incoming[number] = {"ch": ch, "from": caller, "ts": time.time()}
+        try:
+            await self.ari("POST", f"/channels/{ch}/ring")
+        except Exception:
+            pass
+
+    async def customer_answer(self, number: str) -> None:
+        inc = self.incoming.pop(number, None)
+        if not inc or inc["ch"] not in self.alive:
+            raise HTTPException(409, "no incoming call")
+        self.cust_out[number] = inc["ch"]
+        await self.ari("POST", f"/channels/{inc['ch']}/answer")
+        await self._talk(inc["ch"])
+
+    async def customer_reject(self, number: str) -> None:
+        inc = self.incoming.pop(number, None)
+        if not inc or inc["ch"] not in self.alive:
+            raise HTTPException(409, "no incoming call")
+        await self.hangup_channel(inc["ch"], reason="busy")
+
+    # ---------- common ----------
     async def hangup_channel(self, ch: str | None, **params) -> None:
         if ch and ch in self.alive:
             try:
@@ -236,6 +302,28 @@ class Sim:
             await asyncio.sleep(0.5)
         await asyncio.sleep(after)
         await self.hangup_channel(self.agent_ch.get(ext))
+
+    # ---------- customer number pool ----------
+    def claim(self, mode: str) -> str:
+        now = time.time()
+        for n in POOL:
+            p = self.pool.get(n)
+            if not p or now - p["last"] > POOL_STALE:
+                self.pool[n] = {"mode": mode, "last": now}
+                return n
+        raise HTTPException(409, "all customer numbers are in use")
+
+    def heartbeat(self, number: str, mode: str | None = None) -> None:
+        if number not in POOL:
+            raise HTTPException(404, "unknown customer number")
+        p = self.pool.setdefault(number, {"mode": mode or "sim", "last": 0})
+        if mode:
+            p["mode"] = mode
+        p["last"] = time.time()
+
+    def release(self, number: str) -> None:
+        self.pool.pop(number, None)
+        self.incoming.pop(number, None)
 
 
 sim: Sim | None = None
@@ -260,11 +348,27 @@ def require_key(x_api_key: str | None = Header(default=None), api_key: str | Non
 
 router = APIRouter(prefix="/demo", tags=["demo"])
 auth = [Depends(require_key)]
+STATIC = Path(__file__).parent / "static"
 
 
-@router.get("")
-async def page():
-    return FileResponse(Path(__file__).parent / "static" / "demo.html", media_type="text/html")
+# ============================================================ pages
+def _page(name: str):
+    async def handler():
+        return FileResponse(STATIC / f"{name}.html", media_type="text/html")
+    return handler
+
+
+for _route, _file in (("", "index"), ("/customer", "customer"), ("/agent", "agent"), ("/dashboard", "dashboard"),
+                      ("/transactions", "transactions"), ("/flow", "flow")):
+    router.add_api_route(_route, _page(_file), methods=["GET"], include_in_schema=False)
+
+
+@router.get("/config")
+async def demo_config():
+    """Front-end settings. The browser derives the WebSocket URLs from the host it was loaded from."""
+    return {"api_key": config.API_KEY, "pbx_ws_port": 8088, "sim_ws_port": 8089, "domain_hint": "localhost",
+            "number": "1484", "ivr_menu": IVR_MENU, "queue_th": QUEUE_TH, "pool": POOL,
+            "sim_agents": AGENTS, "outbound_prefix": "9"}
 
 
 def _need_demo() -> Sim:
@@ -293,16 +397,44 @@ async def disable():
 
 
 class InboundBody(BaseModel):
-    service: str | None = None      # None = manual (presenter presses the IVR key); claim | policy | general = auto-press
+    service: str | None = None      # None = manual (the user presses the IVR key); else accident|incident|motor|insurance|sales|club
     caller: str | None = None
 
 
 @router.post("/inbound", dependencies=auth)
 async def demo_inbound(body: InboundBody):
     if body.service is not None and body.service not in IVR_DIGIT:
-        raise HTTPException(422, "service must be claim | policy | general")
+        raise HTTPException(422, f"service must be one of {', '.join(IVR_DIGIT)}")
     s = _need_demo()
     return {"caller": await s.inbound(body.service, body.caller)}
+
+
+class BatchBody(BaseModel):
+    count: int = 5
+    service: str | None = None      # None / "random" = every caller picks a random service
+    interval: float = 0.4           # seconds between two callers
+
+
+@router.post("/inbound/batch", dependencies=auth)
+async def demo_inbound_batch(body: BatchBody):
+    """N customers call 1484 at (almost) the same time: IVR -> queue -> agents, all in parallel."""
+    s = _need_demo()
+    if not 1 <= body.count <= 30:
+        raise HTTPException(422, "count must be 1-30")
+    if body.service not in (None, "random") and body.service not in IVR_DIGIT:
+        raise HTTPException(422, f"service must be random or one of {', '.join(IVR_DIGIT)}")
+
+    async def run():
+        for _ in range(body.count):
+            svc = random.choice(list(IVR_DIGIT)) if body.service in (None, "random") else body.service
+            try:
+                await s.inbound(svc, None)
+            except HTTPException as exc:
+                log.warning("batch caller failed: %s", exc.detail)
+            await asyncio.sleep(body.interval)
+
+    s._spawn(run())
+    return {"started": body.count}
 
 
 class PressBody(BaseModel):
@@ -317,6 +449,66 @@ async def demo_press(caller: str, body: PressBody):
     return {"caller": caller, "digit": body.digit}
 
 
+@router.post("/customer/{caller}/hangup", dependencies=auth)
+async def demo_customer_hangup(caller: str):
+    s = _need_demo()
+    await s.hangup_channel(s.customers.get(caller) or s.cust_out.get(caller))
+    return {"caller": caller}
+
+
+@router.post("/customer/{number}/answer", dependencies=auth)
+async def demo_customer_answer(number: str):
+    await _need_demo().customer_answer(number)
+    return {"number": number}
+
+
+@router.post("/customer/{number}/reject", dependencies=auth)
+async def demo_customer_reject(number: str):
+    await _need_demo().customer_reject(number)
+    return {"number": number}
+
+
+class ClaimBody(BaseModel):
+    mode: str = "sim"               # sim | web
+
+
+@router.post("/customers/claim", dependencies=auth)
+async def customers_claim(body: ClaimBody):
+    if body.mode not in ("sim", "web"):
+        raise HTTPException(422, "mode must be sim or web")
+    n = sim.claim(body.mode)
+    return {"number": n, "password": f"poc-{n}", "mode": body.mode}
+
+
+@router.post("/customers/{number}/heartbeat", dependencies=auth)
+async def customers_heartbeat(number: str, mode: str | None = None):
+    sim.heartbeat(number, mode)
+    return {"number": number}
+
+
+@router.post("/customers/{number}/release", dependencies=auth)
+async def customers_release(number: str):
+    sim.release(number)
+    return {"number": number}
+
+
+@router.get("/customers", dependencies=auth)
+async def customers_list():
+    """Customer numbers that are currently online (a browser has claimed them), usable as outbound targets."""
+    now = time.time()
+    return [{"number": n, "mode": p["mode"]} for n, p in sorted(sim.pool.items()) if now - p["last"] < POOL_STALE]
+
+
+@router.get("/customer/{number}", dependencies=auth)
+async def customer_state(number: str):
+    """Poll target of a simulated customer page: ringing outbound call + progress of its own call."""
+    snap = await _snapshot()
+    call = next((c for c in snap["calls"] if c["number"] == number), None)
+    inc = sim.incoming.get(number)
+    return {"number": number, "call": call, "menu_ready": number in sim.menu_ready,
+            "incoming": {"from": inc["from"]} if inc and inc["ch"] in sim.alive else None}
+
+
 @router.post("/agent/{ext}/answer", dependencies=auth)
 async def demo_answer(ext: str):
     await _need_demo().answer(ext)
@@ -327,6 +519,12 @@ async def demo_answer(ext: str):
 async def demo_reject(ext: str):
     await _need_demo().reject(ext)
     return {"agent": ext}
+
+
+@router.post("/agent/{ext}/hold", dependencies=auth)
+async def demo_hold(ext: str, on: bool = True):
+    await _need_demo().hold(ext, on)
+    return {"agent": ext, "hold": on}
 
 
 class AutoBody(BaseModel):
@@ -341,37 +539,32 @@ async def demo_auto(body: AutoBody):
 
 class OutboundBody(BaseModel):
     agent: str
-    outcome: str                    # connected | remote_hangup | busy | no_answer | cancel | congestion | invalid
+    number: str | None = None       # any number; 08000000NN = customer pool (real web phone or simulated customer)
+    outcome: str | None = None      # regression tests only: magic number 09... (connected | busy | no_answer | ...)
 
 
 @router.post("/outbound", dependencies=auth)
 async def demo_outbound(body: OutboundBody):
+    """Click-to-call: the agent's phone rings first, then the number is dialed through the carrier."""
     from . import main as m
-    if body.outcome not in OUTBOUND_NUMBER or body.agent not in AGENTS:
-        raise HTTPException(422, "unknown agent or outcome")
-    s = _need_demo()
-    s.quick.add(body.agent)
-    number = OUTBOUND_NUMBER[body.outcome]
+    if body.outcome:
+        if body.outcome not in OUTBOUND_NUMBER:
+            raise HTTPException(422, "unknown outcome")
+        number = OUTBOUND_NUMBER[body.outcome]
+    elif body.number:
+        number = body.number
+    else:
+        raise HTTPException(422, "number is required")
+    s = sim
+    if body.agent in AGENTS:
+        _need_demo().quick.add(body.agent)
     await m.click_to_call(m.OriginateBody(agent=body.agent, destination=number))
-    if body.outcome == "cancel":
+    if body.outcome == "cancel" and s:
         s._spawn(s.cancel_when_ringing(body.agent))
     return {"dialed": number}
 
 
-@router.post("/agent/{ext}/hold", dependencies=auth)
-async def demo_hold(ext: str, on: bool = True):
-    await _need_demo().hold(ext, on)
-    return {"agent": ext, "hold": on}
-
-
-@router.post("/customer/{caller}/hangup", dependencies=auth)
-async def demo_customer_hangup(caller: str):
-    s = _need_demo()
-    await s.hangup_channel(s.customers.get(caller))
-    return {"caller": caller}
-
-
-# ============================================================ aggregated state for the demo page
+# ============================================================ aggregated state for the demo pages
 def _dialed_number(call_id: str) -> str:
     for e in reversed(ami.recent):
         if e["event"] == "DialBegin" and e.get("Linkedid") == call_id and e.get("DestChannel", "").startswith("PJSIP/trunk-"):
@@ -424,14 +617,14 @@ def _group_calls(rows: list[dict]) -> list[dict]:
         else:
             continue
         held = any(c["channel"] in ami.held for c in chs)
-        menu_ready = any((c["application"] or "").lower() in ("background", "waitexten") for c in trunk)
         if held and stage == "talking":
             stage = "hold"
-        duration = max(_seconds(c["duration"]) for c in chs)
+        queue = _queue_of(cid) if kind == "inbound" else None
         calls.append({"call_id": cid, "direction": kind, "stage": stage, "number": who, "agent": agent,
-                      "menu_ready": menu_ready,
-                      "can_press": stage == "ivr" and menu_ready and who not in sim.pressed and who in sim.customers,
-                      "queue": _queue_of(cid) if kind == "inbound" else None, "duration": duration})
+                      "menu_ready": who in sim.menu_ready,
+                      "can_press": stage == "ivr" and who in sim.menu_ready and who not in sim.pressed and who in sim.customers,
+                      "queue": queue, "queue_th": QUEUE_TH.get(queue, queue),
+                      "duration": max(_seconds(c["duration"]) for c in chs)})
     return sorted(calls, key=lambda c: c["call_id"])
 
 
@@ -455,8 +648,13 @@ def _event_text(e: dict) -> tuple[str, str] | None:
     e = {**e, "Queue": QUEUE_TH.get(e.get("Queue"), e.get("Queue"))}
     m = AGENT_CHAN.match(ch)
     ext = m.group(1) if m else (e.get("Interface", "") or "").split("/")[-1]
+    if n == "IvrPrompt":
+        from .labels import PROMPT_TH
+        p = e.get("Prompt", "").strip()
+        return "ivr", f"IVR เล่นเสียง «{PROMPT_TH.get(p, p)}» ให้ {e.get('CallerIDNum')}"
     if n == "DTMFEnd" and e.get("Direction") == "Received" and ch.startswith("PJSIP/trunk-sim-"):
-        return "ivr", f"ลูกค้า {e.get('CallerIDNum')} กด {e.get('Digit')} ในเมนู IVR"
+        label = IVR_MENU.get(e.get("Digit"), {}).get("th")
+        return "ivr", f"ลูกค้า {e.get('CallerIDNum')} กด {e.get('Digit')}" + (f" ({label})" if label else "")
     if n == "QueueCallerJoin":
         return "queue", f"ลูกค้า {e.get('CallerIDNum')} เข้าคิว {e.get('Queue')} (ลำดับที่ {e.get('Position')})"
     if n == "AgentCalled":
@@ -474,27 +672,47 @@ def _event_text(e: dict) -> tuple[str, str] | None:
     if n == "Unhold" and m:
         return "info", f"Agent {ext} กลับมาคุยต่อ (Unhold)"
     if n == "BlindTransfer":
-        return "info", f"โอนสายไปยัง {e.get('Extension')}"
+        t = e.get("Extension", "")
+        return "info", f"โอนสายจาก {e.get('TransfererCallerIDNum')} ไปยัง {QUEUE_TH.get(t, t)}"
     if n == "OutboundDialResult":
         return "ok" if e["result"] == "CONNECTED" else "warn", f"Agent {e['agent']} โทรออก {e['dialed']} → {e['result']}"
     return None
 
 
+_snap: dict = {"t": 0.0, "v": None}
+_snap_lock = asyncio.Lock()
+
+
+async def _snapshot() -> dict:
+    """agents + queues + calls, shared by all pollers (cached ~0.8 s so 20 open pages do not flood AMI)."""
+    from . import main as m
+    async with _snap_lock:
+        if _snap["v"] is None or time.time() - _snap["t"] > 0.8:
+            ags, qs, rows = await asyncio.gather(m.agents(), m._queues(), m.active_calls())
+            _snap["v"] = {"agents": ags, "queues": qs, "calls": _group_calls(rows)}
+            _snap["t"] = time.time()
+        return _snap["v"]
+
+
 @router.get("/state", dependencies=auth)
 async def state():
-    from . import main as m
-    ags, qs, rows = await asyncio.gather(m.agents(), m._queues(), m.active_calls())
-    calls = _group_calls(rows)
+    from . import agents_admin, main as m
+    snap = await _snapshot()
+    ags, qs, calls = snap["agents"], snap["queues"], snap["calls"]
+    web = {a["ext"]: a for a in agents_admin.load()}
     agents = []
     for a in ags:
-        if not (a["registered"] or a["extension"] in AGENTS):
+        ext = a["extension"]
+        if not (a["registered"] or ext in AGENTS or ext in web):
             continue
-        st = _agent_state(a)
-        agents.append({"extension": a["extension"], "state": st, "simulated": a["extension"] in AGENTS,
-                       "sim_ringing": sim.ringing(a["extension"]),
-                       "call": next((c for c in calls if c["agent"] == a["extension"]), None),
+        agents.append({"extension": ext, "state": _agent_state(a), "simulated": ext in AGENTS,
+                       "kind": "sim" if ext in AGENTS else ("web" if ext in web else "softphone"),
+                       "name": web[ext]["name"] if ext in web else f"Agent {ext}",
+                       "registered": a["registered"], "logged_in": bool(a["queues"]),
+                       "sim_ringing": sim.ringing(ext),
+                       "call": next((c for c in calls if c["agent"] == ext), None),
                        "calls_taken": max((q["calls_taken"] for q in a["queues"].values()), default=0)})
-    events = [{"ts": e["ts"], "kind": k, "text": t} for e in list(ami.recent)[-300:] if (r := _event_text(e)) for k, t in [r]]
+    events = [{"ts": e["ts"], "kind": k, "text": t} for e in list(ami.recent)[-400:] if (r := _event_text(e)) for k, t in [r]]
     last_out = next((e for e in reversed(ami.recent) if e["event"] == "OutboundDialResult"), None)
     return {
         "ami_connected": ami.connected,
@@ -507,11 +725,12 @@ async def state():
             "agents": {s: sum(1 for a in agents if a["state"] == s)
                        for s in ("idle", "busy", "ringing", "paused", "logged_out", "offline")},
         },
-        "queues": [{"name": q["name"], "waiting": q["waiting"], "members": len(q["members"]),
-                    "callers": q["callers"]} for q in qs],
+        "queues": [{"name": q["name"], "name_th": QUEUE_TH.get(q["name"], q["name"]), "waiting": q["waiting"],
+                    "members": len(q["members"]), "callers": q["callers"],
+                    "completed": q["completed"], "abandoned": q["abandoned"]} for q in qs],
         "agents": agents,
         "calls": calls,
-        "events": events[-25:][::-1],
+        "events": events[-40:][::-1],
         "last_outbound": last_out,
         "screenpop": m.crm_inbox[-3:][::-1],
     }

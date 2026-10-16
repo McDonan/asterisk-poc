@@ -6,22 +6,26 @@ WebSocket for real-time call/queue/agent events.
 import asyncio
 import logging
 from contextlib import asynccontextmanager
+from pathlib import Path
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Query, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-from . import config, store
-from . import demo
+from . import agents_admin, config, demo, store, timeline
 from .ami import AmiService
+from .labels import QUEUES
 
 logging.basicConfig(level=logging.INFO)
 ami = AmiService()
+ami.listeners.append(timeline.record)
 crm_inbox: list[dict] = []          # mock CRM: received screen-pop payloads
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    await agents_admin.sync()
     await ami.start()
     yield
     await demo.shutdown()
@@ -30,7 +34,10 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="Asterisk POC API", version="0.1", lifespan=lifespan)
 demo.init(ami)
+agents_admin.init(ami)
 app.include_router(demo.router)
+app.include_router(agents_admin.router)
+app.mount("/static", StaticFiles(directory=Path(__file__).parent / "static"), name="static")
 
 
 def require_key(x_api_key: str | None = Header(default=None), api_key: str | None = Query(default=None)):
@@ -149,7 +156,7 @@ class QueueRef(BaseModel):
 
 @app.post("/agents/{ext}/login", dependencies=auth, tags=["agent"])
 async def agent_login(ext: str, body: QueueRef = QueueRef()):
-    names = [body.queue] if body.queue else ["q-claim", "q-policy", "q-general"]
+    names = [body.queue] if body.queue else QUEUES
     for q in names:
         r = await ami_call(ami.action({"Action": "QueueAdd", "Queue": q, "Interface": f"PJSIP/{ext}",
                                        "MemberName": f"Agent {ext}"}))
@@ -160,7 +167,7 @@ async def agent_login(ext: str, body: QueueRef = QueueRef()):
 
 @app.post("/agents/{ext}/logout", dependencies=auth, tags=["agent"])
 async def agent_logout(ext: str, body: QueueRef = QueueRef()):
-    names = [body.queue] if body.queue else ["q-claim", "q-policy", "q-general"]
+    names = [body.queue] if body.queue else QUEUES
     for q in names:
         await ami_call(ami.action({"Action": "QueueRemove", "Queue": q, "Interface": f"PJSIP/{ext}"}))
     return {"result": f"{ext} logged out", "queues": names}
@@ -182,7 +189,7 @@ async def _agent_channel(ext: str) -> str:
 
 
 class TransferBody(BaseModel):
-    target: str          # extension (e.g. "1002") or queue name (e.g. "q-policy")
+    target: str          # extension (e.g. "1002") or queue name (e.g. "q-motor")
 
 
 @app.post("/agents/{ext}/transfer", dependencies=auth, tags=["agent"])
@@ -276,6 +283,28 @@ async def recording_file(path: str):
 async def queue_log(limit: int = Query(200, le=2000), queue: str | None = None, event: str | None = None):
     """Raw Asterisk queue_log (ENTERQUEUE, CONNECT, ABANDON, COMPLETEAGENT, ...)."""
     return store.read_queue_log(limit, queue, event)
+
+
+# ============================================================ transactions (call timeline)
+@app.get("/transactions", dependencies=auth, tags=["history"])
+async def transactions(limit: int = Query(50, le=300), direction: str | None = Query(None, pattern="^(inbound|outbound)$"),
+                       q: str | None = None):
+    """One row per call with its journey: IVR digits, queues, agents, transfers (from -> to), result."""
+    return timeline.list_calls(limit, direction, q)
+
+
+@app.get("/transactions/{call_id}", dependencies=auth, tags=["history"])
+async def transaction(call_id: str):
+    """All steps of one call, each with the module that talks to the next module (customer -> pjsip -> ivr -> queue -> agent ...)."""
+    t = timeline.get_call(call_id)
+    if not t:
+        raise HTTPException(404, "call not found")
+    try:
+        row = next((r for r in store.call_history(1000) if r["call_id"] == call_id), None)
+    except FileNotFoundError:
+        row = None
+    t["cdr"] = row
+    return t
 
 
 # ============================================================ real-time events

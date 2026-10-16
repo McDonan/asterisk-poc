@@ -8,19 +8,21 @@ services:
     <<: *asterisk
     build: ./asterisk
     container_name: poc-pbx
+    hostname: pbx          # appears in SIP From/Contact; SIP.js cannot parse the default hex hostname
     restart: unless-stopped
     environment:
       # IP the softphone on the Docker host uses to reach RTP (use your LAN IP for phones on the LAN)
       HOST_MEDIA_ADDR: ${HOST_MEDIA_ADDR:-127.0.0.1}
     ports:
       - "${BIND_ADDR:-127.0.0.1}:5060:5060/udp"
-      - "${BIND_ADDR:-127.0.0.1}:10000-10050:10000-10050/udp"
+      - "${BIND_ADDR:-127.0.0.1}:10000-10100:10000-10100/udp"
       - "127.0.0.1:5038:5038"   # AMI
-      - "127.0.0.1:8088:8088"   # ARI / HTTP
+      - "127.0.0.1:8088:8088"   # ARI / HTTP / WebSocket SIP (ws://localhost:8088/ws)
     volumes:
       - ./asterisk/etc:/etc/asterisk-src:ro
       - pbx-monitor:/var/spool/asterisk/monitor
       - pbx-log:/var/log/asterisk
+      - pbx-dyn:/etc/asterisk-dyn:ro   # pjsip_agents.conf written by the API (web agents)
     networks:
       poc:
         ipv4_address: 172.28.0.10
@@ -29,12 +31,17 @@ services:
   sim:
     <<: *asterisk
     container_name: poc-sim
+    hostname: sim
     restart: unless-stopped
     depends_on: [pbx]
+    environment:
+      HOST_MEDIA_ADDR: ${HOST_MEDIA_ADDR:-127.0.0.1}
+      CUSTOMER_POOL: "20"          # customer browser phones 0800000001..0800000020
     volumes:
       - ./sim/etc:/etc/asterisk-src:ro
     ports:
-      - "127.0.0.1:8089:8088"
+      - "127.0.0.1:8089:8088"      # ARI + WebSocket SIP for the customers' browsers (ws://localhost:8089/ws)
+      - "${BIND_ADDR:-127.0.0.1}:12000-12100:12000-12100/udp"
     networks:
       poc:
         ipv4_address: 172.28.0.20
@@ -51,6 +58,8 @@ services:
     volumes:
       - pbx-monitor:/pbx-monitor:ro
       - pbx-log:/pbx-log:ro
+      - pbx-dyn:/pbx-dyn            # generated pjsip_agents.conf (read by the PBX)
+      - api-data:/data              # call timeline (transactions) + agent registry
     networks:
       poc:
         ipv4_address: 172.28.0.30
@@ -74,6 +83,8 @@ services:
 volumes:
   pbx-monitor:
   pbx-log:
+  pbx-dyn:
+  api-data:
 
 networks:
   poc:

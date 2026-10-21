@@ -210,3 +210,31 @@ class Softphone {
   }
 }
 window.Softphone = Softphone;
+
+/* Local tones: DTMF keypad beeps and incoming-call ringtone (WebAudio). */
+const Tones = (() => {
+  let ctx = null, ringT = null;
+  const ac = () => {
+    ctx = ctx || new (window.AudioContext || window.webkitAudioContext)();
+    if (ctx.state === 'suspended') ctx.resume().catch(() => {});
+    return ctx;
+  };
+  const beep = (freqs, dur, vol) => {
+    const c = ac(), g = c.createGain(), t = c.currentTime;
+    g.gain.setValueAtTime(vol, t); g.gain.setValueAtTime(vol, t + dur - 0.01); g.gain.linearRampToValueAtTime(0, t + dur);
+    g.connect(c.destination);
+    for (const f of freqs) { const o = c.createOscillator(); o.frequency.value = f; o.connect(g); o.start(t); o.stop(t + dur); }
+  };
+  const ROW = { 1: 697, 2: 697, 3: 697, 4: 770, 5: 770, 6: 770, 7: 852, 8: 852, 9: 852, '*': 941, 0: 941, '#': 941 };
+  const COL = { 1: 1209, 2: 1336, 3: 1477, 4: 1209, 5: 1336, 6: 1477, 7: 1209, 8: 1336, 9: 1477, '*': 1209, 0: 1336, '#': 1477 };
+  return {
+    key(k) { if (ROW[k]) { try { beep([ROW[k], COL[k]], 0.12, 0.08); } catch (e) { /* no audio */ } } },
+    ring(on) {
+      if (on && !ringT) {
+        const burst = () => { try { beep([440, 480], 0.9, 0.08); } catch (e) { /* no audio */ } };
+        burst(); ringT = setInterval(burst, 3000);
+      } else if (!on && ringT) { clearInterval(ringT); ringT = null; }
+    },
+  };
+})();
+window.Tones = Tones;

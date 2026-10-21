@@ -20,7 +20,7 @@
       <div class="panel"><h2>สถานะ</h2>
         <div class="row" style="justify-content:space-between"><div class="state" id="state">—</div><div class="mut" id="kind"></div></div>
         <div class="row" style="margin-top:10px">
-          <button id="b-ready" class="ok">พร้อมรับสาย</button><button id="b-break">พัก (Break)</button><button id="b-out">ออกจากระบบคิว</button>
+          <button id="b-login" class="primary">Login (Softphone)</button><button id="b-ready" class="ok">พร้อมรับสาย</button><button id="b-break">พัก (Break)</button><button id="b-out">ออกจากระบบคิว</button>
         </div>
         <div class="mut" style="margin-top:8px" id="regline"></div>
       </div>
@@ -96,6 +96,9 @@ function render() {
   $('#tsel').disabled = $('#b-xfer').disabled = !live;
   const ok = !!a && (kind !== 'web' || reg === 'registered');
   for (const id of ['b-ready', 'b-break', 'b-out', 'b-dial']) $('#' + id).disabled = !ok;
+  $('#b-login').style.display = kind === 'web' ? '' : 'none';
+  $('#b-login').textContent = phone ? 'Logout (Softphone)' : 'Login (Softphone)';
+  $('#b-login').disabled = !a;
 }
 
 function fillTargets() {
@@ -126,10 +129,19 @@ async function pick(e) {
   const a = S && S.agents.find(x => x.extension === e);
   kind = a ? a.kind : null; reg = 'offline'; muted = false;
   history.replaceState(null, '', `?ext=${e}`);
-  if (kind === 'web') {
+  if (kind === 'sim') {
+    if (S && !S.demo.enabled) { await api('/demo/enable', 'POST'); toast('เปิดโหมด demo แล้ว', 'ok'); }
+  }
+  render();
+}
+
+async function softLogin() {
+  const e = ext;
+  if (kind === 'web' && !phone) {
     const reg_ = await api('/demo/agents/registry');
     const me = reg_.find(x => x.extension === e);
     if (!me) return;
+    reg = 'connecting'; render();
     phone = new Softphone({
       server: `ws://${location.hostname}:${CFG.pbx_ws_port}/ws`, domain: location.hostname, user: e, password: me.password,
       displayName: me.name, audio: $('#remote'),
@@ -141,12 +153,17 @@ async function pick(e) {
       },
     });
     try { await phone.start(); } catch (x) { reg = 'failed'; toast('SIP: ' + x.message, 'err'); }
-  } else if (kind === 'sim') {
-    if (S && !S.demo.enabled) { await api('/demo/enable', 'POST'); toast('เปิดโหมด demo แล้ว', 'ok'); }
   }
   render();
 }
 
+async function softLogout() {
+  if (phone) { const p = phone; phone = null; reg = 'offline'; render(); try { await p.stop(); } catch (x) {} }
+  await api(`/agents/${ext}/logout`, 'POST', {}, true).catch(() => {});
+  refresh();
+}
+
+$('#b-login').onclick = () => phone ? softLogout() : softLogin();
 $('#sel').onchange = () => pick($('#sel').value);
 $('#b-ready').onclick = async () => { await api(`/agents/${ext}/login`, 'POST', {}); await api(`/agents/${ext}/pause?paused=false`, 'POST').catch(() => {}); refresh(); };
 $('#b-break').onclick = async () => { await api(`/agents/${ext}/login`, 'POST', {}); await api(`/agents/${ext}/pause?paused=true&reason=break`, 'POST'); refresh(); };

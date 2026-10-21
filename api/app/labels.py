@@ -16,6 +16,7 @@ QUEUE_TH = {v["queue"]: v["th"] for v in IVR_MENU.values()}
 PROMPT_TH = {
     "th-welcome": "ข้อความต้อนรับ", "th-menu": "เมนูเลือกบริการ (กด 1-6)", "th-invalid": "กดผิด / ไม่มีตัวเลือกนี้",
     "th-goodbye": "ขอบคุณ / วางสาย", "th-holdon": "กรุณารอสักครู่ (เข้าคิว)", "th-noagent": "ขณะนี้ไม่มีเจ้าหน้าที่",
+    "th-rate": "ให้คะแนนเจ้าหน้าที่ (กด 1-5)",
 }
 
 # Modules of the platform (keys used by the timeline and by the Flow Map page)

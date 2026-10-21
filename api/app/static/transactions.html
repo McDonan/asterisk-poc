@@ -53,7 +53,7 @@ async function show(id, keep) {
     <div class="row">${chip(s.result)} <span class="chip">${s.direction === 'inbound' ? 'สายเข้า' : 'สายออก'}</span><span class="mono">${esc(s.direction === 'inbound' ? s.caller : (s.dialed || ''))}</span>
       <span class="mut">${fmtDateTime(s.start)} · ${mmss(s.duration)}</span></div>
     ${s.transfers.length ? `<div class="xfer" style="margin:8px 0">โอนสาย: ${s.transfers.map(x => `Agent ${esc(x.from)} → ${esc(x.type === 'queue' ? 'คิว ' + (x.to_label || x.to) : 'Agent ' + x.to)}`).join(', ')}</div>` : ''}
-    ${cdr ? `<div class="mut" style="margin:6px 0">CDR: ${esc(cdr.disposition || '')} · รอ/โทร ${cdr.ring_seconds || 0}s · คุย ${cdr.talk_seconds}s · บันทึกเสียง: ${cdr.recording_status === 'recorded' ? 'มี' : 'ไม่มี'}</div>${rec}` : '<div class="mut" style="margin:6px 0">CDR ยังไม่พร้อม (สายยังไม่จบ)</div>'}
+    ${cdr ? `<div class="mut" style="margin:6px 0">CDR: ${esc(cdr.disposition || '')} · รอ/โทร ${cdr.ring_seconds || 0}s · คุย ${cdr.talk_seconds}s · คะแนน ${cdr.rating ? cdr.rating + '/5' : '-'} · บันทึกเสียง: ${cdr.recording_status === 'recorded' ? 'มี' : 'ไม่มี'}</div>${rec}` : '<div class="mut" style="margin:6px 0">CDR ยังไม่พร้อม (สายยังไม่จบ)</div>'}
     <div class="tl" style="margin-top:14px">${t.steps.map(st => `
       <div class="step ${st.kind}"><div class="m">+${st.t}s · ${fmtTime(st.ts)} <span class="arrow">${esc(st.from_name)} → ${esc(st.to_name)}</span></div>
       <div class="txt">${esc(st.text)}</div></div>`).join('')}</div>`;

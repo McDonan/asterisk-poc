@@ -96,7 +96,7 @@ class Sim:
     def _on_ami(self, e: dict) -> None:
         n, who = e["event"], e.get("CallerIDNum")
         if n == "IvrPrompt":
-            if e.get("Prompt", "").strip() == "th-menu":
+            if e.get("Prompt", "").strip() in ("th-menu", "th-rate"):
                 self.menu_ready.add(who)
             else:
                 self.menu_ready.discard(who)

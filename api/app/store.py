@@ -97,8 +97,10 @@ def call_history(limit=50, caller=None, date_from=None, date_to=None,
             "direction": None, "ivr_choice": None, "queue": None, "agent": None, "agents": [],
             "dialed": None, "dial_status": None, "hangup_cause": None,
             "total_seconds": 0, "ring_seconds": 0, "talk_seconds": 0, "disposition": None,
-            "recording": None, "legs": 0,
+            "recording": None, "legs": 0, "rating": None,
         })
+        if r.get("rating") not in (None, ""):
+            c["rating"] = _num(r["rating"])
         c["legs"] += 1
         c["direction"] = c["direction"] or r.get("direction") or None
         c["ivr_choice"] = c["ivr_choice"] or r.get("ivr_choice") or None

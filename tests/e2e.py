@@ -286,7 +286,8 @@ async def s4_abandon_and_noagent():
     await reset_agents([])
     caller, mark = "0855555555", len(LOG)
     cust = await place_call(caller, "3")
-    await wait_gone(cust, 40)
+    await wait_until(lambda: cust in ALIVE, 15, 0.3, "customer answered")
+    await wait_gone(cust, 100)     # silent customer: no-agent message, fallback menu x2, goodbye
     call = await find_call(caller)
     check("no logged-in agent: call rejected after message, no agent leg", call["agent"] is None, json.dumps(call))
     await reset_agents(AGENTS)
@@ -468,6 +469,124 @@ async def s10_concurrent():
     await asyncio.sleep(6)
 
 
+async def read_waiting(caller: str, timeout=60) -> bool:
+    """The fallback menu / number / slot prompt is playing (dialplan Read())."""
+    async def f():
+        for c in (await api.get("/calls/active")).json():
+            if c["caller"] == caller and (c["application"] or "").lower() == "read":
+                return True
+        return False
+    return await wait_until(f, timeout, 0.3, f"fallback prompt for {caller}")
+
+
+async def dtmf(ch: str, digits: str):
+    await ari("POST", f"/channels/{ch}/dtmf", dtmf=digits)
+    await asyncio.sleep(1.5)       # let the dialplan move on to the next Read()
+
+
+async def tx_summary(caller: str, timeout=25):
+    async def f():
+        rows = (await api.get("/transactions", params={"q": caller, "limit": 5})).json()
+        return rows[0] if rows and rows[0]["result"] not in ("IN_PROGRESS", "TALKING") else None
+    return await wait_until(f, timeout, 1, f"transaction of {caller}")
+
+
+async def s11_fallback():
+    print("\n[S11] After hours / no agent: voicemail or callback (own number / other number + time slot)")
+    r = await api.post("/hours", json={"mode": "closed"})
+    check("hours override set to closed", r.status_code == 200 and not r.json()["open_now"], r.text[:150])
+    await reset_agents(AGENTS)
+
+    # accident hotline is 24 h: still rings an agent although the center is closed
+    mark = len(LOG)
+    cust = await place_call("0890000009", "1")
+    ans = await wait_agent_answer(mark, 60)
+    check("closed hours: q-accident (24 h hotline) still reaches an agent", True, f"agent {ans[1]}")
+    await asyncio.sleep(3)
+    await hangup(ans[2])
+    await wait_gone(cust)
+    await asyncio.sleep(2)
+
+    # 1: voicemail
+    caller = "0890000001"
+    cust = await place_call(caller, "3")
+    await read_waiting(caller)
+    await dtmf(cust, "1")
+    await asyncio.sleep(9)         # intro prompt + beep; then the sim customer speaks (recorded as the message)
+    await talk(cust)
+    await asyncio.sleep(8)
+    await hangup(cust)
+    await wait_gone(cust)
+    async def vm_msg():
+        return [m for m in (await api.get("/voicemail", params={"mailbox": "motor"})).json() if m["caller"] == caller]
+    msgs = await wait_until(vm_msg, 20, 1, "voicemail message")
+    check("voicemail stored in mailbox motor with caller number", bool(msgs), json.dumps(msgs[:1]))
+    m = msgs[0]
+    data = (await api.get(f"/voicemail/{m['mailbox']}/{m['folder']}/{m['message']}")).content
+    check("voicemail downloadable, valid WAV", data[:4] == b"RIFF" and len(data) > 8000, f"{len(data)} bytes")
+    row = await tx_summary(caller)
+    check("transaction result=VOICEMAIL, reason=after_hours",
+          row["result"] == "VOICEMAIL" and row["fallback_reason"] == "after_hours", json.dumps(row)[:200])
+    detail = (await api.get(f"/transactions/{row['call_id']}")).json()
+    kinds = [s["kind"] for s in detail["steps"]]
+    check("transaction shows the transfer to voicemail", "fallback_offer" in kinds and "fallback_voicemail" in kinds,
+          ",".join(dict.fromkeys(kinds)))
+    check("transaction links the voicemail message", bool(detail.get("voicemail")))
+    check("menu key presses of the fallback are not shown as IVR choices", row["ivr_digits"] == ["3"], str(row["ivr_digits"]))
+
+    # 2: callback on the number the customer called from
+    caller = "0890000002"
+    cust = await place_call(caller, "5")
+    await read_waiting(caller)
+    await dtmf(cust, "2")
+    await read_waiting(caller)      # time slot prompt
+    await dtmf(cust, "2")
+    await wait_gone(cust, 30)
+
+    async def cb_row(number):
+        return next((c for c in (await api.get("/callbacks")).json() if c["callback_number"] == number), None)
+    cb = await wait_until(lambda: cb_row(caller), 25, 1, "callback request")
+    check("callback: own number + slot 2 (afternoon), topic sales, reason after_hours",
+          cb["slot"] == "2" and cb["queue"] == "q-sales" and cb["reason"] == "after_hours" and cb["status"] == "pending",
+          json.dumps(cb))
+    row = await tx_summary(caller)
+    check("transaction result=CALLBACK with number and slot",
+          row["result"] == "CALLBACK" and row["callback"]["number"] == caller and row["callback"]["slot"] == "2", json.dumps(row)[:200])
+    r = await api.post(f"/callbacks/{cb['call_id']}/status", json={"status": "done", "note": "called back"})
+    done = [c for c in (await api.get("/callbacks", params={"status": "done"})).json() if c["call_id"] == cb["call_id"]]
+    check("callback marked as done", r.status_code == 200 and bool(done))
+
+    # 3: callback on another number
+    caller, other = "0890000003", "0812345678"
+    cust = await place_call(caller, "4")
+    await read_waiting(caller)
+    await dtmf(cust, "3")
+    await read_waiting(caller)      # number prompt
+    await dtmf(cust, other)
+    await read_waiting(caller)      # time slot prompt
+    await dtmf(cust, "1")
+    await wait_gone(cust, 30)
+    cb = await wait_until(lambda: cb_row(other), 25, 1, "callback request (other number)")
+    check("callback: other number + slot 1 (morning), topic insurance",
+          cb["caller"] == caller and cb["slot"] == "1" and cb["queue"] == "q-insurance", json.dumps(cb))
+
+    # no agent while the center is open -> same offer with reason no_agent
+    await api.post("/hours", json={"mode": "open"})
+    await reset_agents([])
+    caller = "0890000004"
+    cust = await place_call(caller, "3")
+    await read_waiting(caller, 90)
+    await asyncio.sleep(1)
+    await hangup(cust)
+    await wait_gone(cust)
+    row = await tx_summary(caller)
+    detail = (await api.get(f"/transactions/{row['call_id']}")).json()
+    offer = next((s for s in detail["steps"] if s["kind"] == "fallback_offer"), None)
+    check("open hours, nobody logged in: fallback offered with reason no_agent",
+          bool(offer) and offer["detail"]["reason"] == "no_agent", json.dumps(offer)[:200] if offer else "no offer")
+    await reset_agents(AGENTS)
+
+
 async def main() -> int:
     # wait for API + AMI
     async def ready():
@@ -477,6 +596,7 @@ async def main() -> int:
             return False
     await wait_until(ready, 90, 2, "API/AMI ready")
     await api.post("/demo/disable")      # only one ARI client may serve Stasis app "sim"
+    await api.post("/hours", json={"mode": "open"})   # scenarios S0-S10 assume the call center is open
 
     async with websockets.connect(
         f"ws://{SIM_ARI}/ari/events?app=sim&api_key={ARI_USER}:{ARI_PASS}") as ws:
@@ -489,7 +609,7 @@ async def main() -> int:
             only = {x.strip() for x in os.getenv("ONLY", "").split(",") if x.strip()}   # e.g. ONLY=s0,s1
             for sc in (s0_registration, s1_full_flow, s2_distribution, s3_transfer,
                        s4_abandon_and_noagent, s5_click_to_call, s6_ivr_invalid, s7_outbound,
-                       s8_transactions, s9_agents_admin, s10_concurrent):
+                       s8_transactions, s9_agents_admin, s10_concurrent, s11_fallback):
                 if only and sc.__name__.split("_")[0] not in only and sc is not s0_registration:
                     continue
                 try:
@@ -497,6 +617,7 @@ async def main() -> int:
                 except Exception as exc:  # keep going, report
                     check(f"{sc.__name__} aborted", False, repr(exc))
         finally:
+            await api.post("/hours", json={"mode": "auto"})
             loop_task.cancel()
 
     failed = [r for r in RESULTS if not r[1]]

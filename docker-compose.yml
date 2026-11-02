@@ -21,6 +21,7 @@ services:
     volumes:
       - ./asterisk/etc:/etc/asterisk-src:ro
       - pbx-monitor:/var/spool/asterisk/monitor
+      - pbx-voicemail:/var/spool/asterisk/voicemail
       - pbx-log:/var/log/asterisk
       - pbx-dyn:/etc/asterisk-dyn:ro   # pjsip_agents.conf written by the API (web agents)
     networks:
@@ -58,6 +59,7 @@ services:
     volumes:
       - pbx-monitor:/pbx-monitor:ro
       - pbx-log:/pbx-log:ro
+      - pbx-voicemail:/pbx-voicemail:ro
       - pbx-dyn:/pbx-dyn            # generated pjsip_agents.conf (read by the PBX)
       - api-data:/data              # call timeline (transactions) + agent registry
     networks:
@@ -82,6 +84,7 @@ services:
 
 volumes:
   pbx-monitor:
+  pbx-voicemail:
   pbx-log:
   pbx-dyn:
   api-data:

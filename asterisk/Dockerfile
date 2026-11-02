@@ -33,6 +33,9 @@ RUN set -eux; \
     ldconfig; \
     cd /; rm -rf /usr/src/asterisk
 
+# tzdata: business hours are evaluated in Asia/Bangkok (GotoIfTime). Separate layer so the Asterisk build stays cached.
+RUN apt-get update && apt-get install -y --no-install-recommends tzdata && rm -rf /var/lib/apt/lists/*
+
 # Thai/English IVR prompts neural TTS wavs from prompts/ (espeak-ng fallback) (POC only - replace with studio recordings)
 COPY prompts/ /var/lib/asterisk/sounds/poc/
 COPY gen-prompts.sh /tmp/gen-prompts.sh

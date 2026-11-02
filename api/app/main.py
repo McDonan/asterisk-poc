@@ -6,6 +6,7 @@ WebSocket for real-time call/queue/agent events.
 import asyncio
 import logging
 from contextlib import asynccontextmanager
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Query, WebSocket, WebSocketDisconnect
@@ -15,7 +16,7 @@ from pydantic import BaseModel
 
 from . import agents_admin, config, demo, store, timeline
 from .ami import AmiService
-from .labels import QUEUES
+from .labels import BUSINESS_HOURS, CALLBACK_SLOTS, FALLBACK_REASON_TH, QUEUE_TH, QUEUES
 
 logging.basicConfig(level=logging.INFO)
 ami = AmiService()
@@ -304,7 +305,106 @@ async def transaction(call_id: str):
     except FileNotFoundError:
         row = None
     t["cdr"] = row
+    sm = t["summary"]
+    if sm.get("fallback") == "voicemail":
+        try:
+            start = datetime.fromisoformat(sm["start"]).timestamp()
+            end = datetime.fromisoformat(sm["end"]).timestamp() if sm.get("end") else start + sm["duration"]
+            t["voicemail"] = store.voicemail_for_call(sm["caller"], start, end)
+        except (ValueError, OSError):
+            t["voicemail"] = None
     return t
+
+
+# ============================================================ business hours / voicemail / callback requests
+def _schedule_open(now: datetime | None = None) -> bool:
+    """Business-hours schedule (same as dialplan [sub-hours]); Thailand has no DST so a fixed offset is enough."""
+    h = BUSINESS_HOURS
+    now = (now or datetime.now(timezone.utc)).astimezone(timezone(timedelta(hours=h["tz_offset_hours"])))
+    return now.weekday() in h["days"] and h["open"] <= now.strftime("%H:%M") <= h["close"]
+
+
+async def _hours_mode() -> str:
+    r = dict(await ami_call(ami.action({"Action": "Getvar", "Variable": "HOURS_OVERRIDE"})))
+    return r.get("Value") or "auto"
+
+
+class HoursBody(BaseModel):
+    mode: str          # auto | open | closed
+
+
+@app.get("/hours", dependencies=auth, tags=["fallback"])
+async def hours():
+    """Business hours and the current override (auto = follow the schedule, open / closed = forced for demos and tests)."""
+    mode = await _hours_mode()
+    sched = _schedule_open()
+    return {"mode": mode, "schedule": BUSINESS_HOURS["text"], "open_by_schedule": sched,
+            "open_now": sched if mode == "auto" else mode == "open"}
+
+
+@app.post("/hours", dependencies=auth, tags=["fallback"])
+async def set_hours(body: HoursBody):
+    if body.mode not in ("auto", "open", "closed"):
+        raise HTTPException(422, "mode must be auto, open or closed")
+    _ok(await ami_call(ami.action({"Action": "Setvar", "Variable": "HOURS_OVERRIDE", "Value": body.mode})))
+    return await hours()
+
+
+@app.get("/voicemail", dependencies=auth, tags=["fallback"])
+async def voicemail(mailbox: str | None = Query(None, description="accident, incident, motor, insurance, sales, club")):
+    """Voicemail messages left by customers (newest first)."""
+    items = store.list_voicemail(mailbox)
+    for m in items:
+        m["queue"] = f"q-{m['mailbox']}"
+        m["queue_th"] = QUEUE_TH.get(m["queue"], m["mailbox"])
+    return items
+
+
+@app.get("/voicemail/{mailbox}/{folder}/{message}", dependencies=auth, tags=["fallback"])
+async def voicemail_file(mailbox: str, folder: str, message: str):
+    try:
+        return FileResponse(store.resolve_voicemail(mailbox, folder, message), media_type="audio/wav")
+    except FileNotFoundError:
+        raise HTTPException(404, "voicemail not found")
+
+
+@app.get("/callbacks", dependencies=auth, tags=["fallback"])
+async def callbacks(status: str | None = Query(None, pattern="^(pending|done)$"), limit: int = Query(200, le=1000)):
+    """Customers who asked to be called back: number, chosen time slot, topic, reason and handled status."""
+    try:
+        rows = store.call_history(limit * 3)
+    except FileNotFoundError:
+        return []
+    st = timeline.callback_statuses()
+    out = []
+    for r in rows:
+        if r["fallback"] != "callback":
+            continue
+        s = st.get(r["call_id"], {"status": "pending", "note": None, "ts": None})
+        if status and s["status"] != status:
+            continue
+        q = f"q-{r['fallback_queue']}" if r["fallback_queue"] else None
+        out.append({
+            "call_id": r["call_id"], "requested_at": r["start"], "caller": r["caller"],
+            "callback_number": r["callback_number"], "slot": r["callback_slot"],
+            "slot_label": CALLBACK_SLOTS.get(r["callback_slot"] or "", r["callback_slot"]),
+            "queue": q, "queue_th": QUEUE_TH.get(q, q), "reason": r["fallback_reason"],
+            "reason_th": FALLBACK_REASON_TH.get(r["fallback_reason"] or "", r["fallback_reason"]),
+            "status": s["status"], "note": s["note"], "handled_at": s["ts"],
+        })
+    return sorted(out, key=lambda x: x["requested_at"], reverse=True)[:limit]
+
+
+class CallbackStatus(BaseModel):
+    status: str = "done"          # pending | done
+    note: str | None = None
+
+
+@app.post("/callbacks/{call_id}/status", dependencies=auth, tags=["fallback"])
+async def callback_status(call_id: str, body: CallbackStatus):
+    if body.status not in ("pending", "done"):
+        raise HTTPException(422, "status must be pending or done")
+    return timeline.set_callback_status(call_id, body.status, body.note)
 
 
 # ============================================================ real-time events

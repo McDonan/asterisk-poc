@@ -96,8 +96,10 @@ class Sim:
     def _on_ami(self, e: dict) -> None:
         n, who = e["event"], e.get("CallerIDNum")
         if n == "IvrPrompt":
-            if e.get("Prompt", "").strip() in ("th-menu", "th-rate"):
+            if e.get("Prompt", "").strip() in ("th-menu", "th-rate", "th-fallback-menu", "th-callback-number", "th-callback-slot"):
                 self.menu_ready.add(who)
+                if e["Prompt"].strip().startswith(("th-fallback", "th-callback")):
+                    self.pressed.discard(who)         # fallback menu (voicemail / callback) asks for new keys
             else:
                 self.menu_ready.discard(who)
         elif n in ("QueueCallerJoin", "Hangup"):
@@ -359,7 +361,7 @@ def _page(name: str):
 
 
 for _route, _file in (("", "index"), ("/customer", "customer"), ("/agent", "agent"), ("/dashboard", "dashboard"),
-                      ("/transactions", "transactions"), ("/flow", "flow")):
+                      ("/transactions", "transactions"), ("/flow", "flow"), ("/inbox", "inbox")):
     router.add_api_route(_route, _page(_file), methods=["GET"], include_in_schema=False)
 
 

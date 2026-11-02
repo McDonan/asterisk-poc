@@ -41,7 +41,8 @@
 $('#nav').outerHTML = nav('/demo/customer');
 const KEYS = [['1',''],['2','ABC'],['3','DEF'],['4','GHI'],['5','JKL'],['6','MNO'],['7','PQRS'],['8','TUV'],['9','WXYZ'],['*',''],['0','+'],['#','']];
 $('#keys').innerHTML = KEYS.map(([k, s]) => `<button data-k="${k}">${k}<small>${s || '&nbsp;'}</small></button>`).join('');
-const PROMPT = { 'th-welcome': 'ข้อความต้อนรับ', 'th-menu': 'เมนู: กด 1-6', 'th-invalid': 'กดผิด', 'th-goodbye': 'ขอบคุณ', 'th-holdon': 'กรุณารอสักครู่', 'th-noagent': 'ไม่มีเจ้าหน้าที่', 'th-rate': 'ให้คะแนนเจ้าหน้าที่ กด 1-5' };
+const PROMPT = { 'th-welcome': 'ข้อความต้อนรับ', 'th-menu': 'เมนู: กด 1-6', 'th-invalid': 'กดผิด', 'th-goodbye': 'ขอบคุณ', 'th-holdon': 'กรุณารอสักครู่', 'th-noagent': 'ไม่มีเจ้าหน้าที่', 'th-rate': 'ให้คะแนนเจ้าหน้าที่ กด 1-5',
+  'th-closed': 'นอกเวลาทำการ', 'th-fallback-menu': 'กด 1 ฝากข้อความ / 2 โทรกลับเบอร์นี้ / 3 โทรกลับเบอร์อื่น', 'th-vm-intro': 'ฝากข้อความหลังสัญญาณ', 'th-callback-number': 'กดเบอร์ที่ให้โทรกลับ แล้วกด #', 'th-callback-slot': 'เลือกช่วงเวลา กด 1 เช้า / 2 บ่าย / 3 เย็น', 'th-callback-ok': 'บันทึกการขอให้โทรกลับแล้ว' };
 const STAGE = { ivr: 'ฟังเมนู IVR', queue: 'รอเจ้าหน้าที่ (เข้าคิว)', talking: 'กำลังสนทนา', hold: 'เจ้าหน้าที่พักสาย' };
 const player = new IvrPlayer();
 let mode = 'real', number = null, phone = null, hbT = null, pollT = null, reg = 'connecting';

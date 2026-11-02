@@ -58,7 +58,7 @@ class IvrPlayer {
 
 function nav(cur) {
   const links = [['/demo', 'หน้าแรก'], ['/demo/customer', 'ลูกค้า'], ['/demo/agent', 'Agent'], ['/demo/dashboard', 'Dashboard'],
-    ['/demo/transactions', 'Transactions'], ['/demo/flow', 'Flow Map']];
+    ['/demo/transactions', 'Transactions'], ['/demo/inbox', 'Voicemail / โทรกลับ'], ['/demo/flow', 'Flow Map']];
   return `<nav>${links.map(([h, t]) => `<a href="${h}" ${h === cur ? 'class="cur"' : ''}>${t}</a>`).join('')}</nav>`;
 }
 

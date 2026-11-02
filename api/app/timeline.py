@@ -11,7 +11,7 @@ from datetime import datetime
 from pathlib import Path
 
 from . import config
-from .labels import IVR_MENU, MODULES, PROMPT_TH, QUEUE_TH
+from .labels import CALLBACK_SLOTS, FALLBACK_REASON_TH, IVR_MENU, MODULES, PROMPT_TH, QUEUE_TH
 
 log = logging.getLogger("timeline")
 AGENT_CHAN = re.compile(r"^PJSIP/(\d{4})-")
@@ -35,6 +35,8 @@ def _db() -> sqlite3.Connection:
             id INTEGER PRIMARY KEY AUTOINCREMENT, call_id TEXT NOT NULL, ts TEXT NOT NULL, kind TEXT NOT NULL,
             frm TEXT, "to" TEXT, text TEXT, detail TEXT)""")
         _conn.execute("CREATE INDEX IF NOT EXISTS steps_call ON steps(call_id, id)")
+        _conn.execute("""CREATE TABLE IF NOT EXISTS callback_status (
+            call_id TEXT PRIMARY KEY, status TEXT NOT NULL, note TEXT, ts TEXT NOT NULL)""")
     return _conn
 
 
@@ -65,10 +67,27 @@ def _step(e: dict) -> tuple[str, dict] | None:
     if n == "IvrPrompt":
         p = e.get("Prompt", "").strip()
         return s("ivr_prompt", "ivr", "customer", f"IVR เล่นเสียง: {PROMPT_TH.get(p, p)}", prompt=p)
-    if n == "DTMFEnd" and e.get("Direction") == "Received" and TRUNK_CHAN.match(ch):
+    if n == "DTMFEnd" and e.get("Direction") == "Received" and TRUNK_CHAN.match(ch) and e.get("Context", "ivr-main") == "ivr-main":
         d = e.get("Digit", "")
         label = IVR_MENU.get(d, {}).get("th", "")
         return s("ivr_digit", "customer", "ivr", f"ลูกค้ากด {d}" + (f" = {label}" if label else ""), digit=d, service=label)
+    if n == "Fallback":
+        box, kind = e.get("Mailbox", ""), e.get("Type")
+        qth = QUEUE_TH.get(f"q-{box}", box)
+        if kind == "offered":
+            reason = e.get("Reason", "")
+            return s("fallback_offer", "ivr", "customer",
+                     f"{FALLBACK_REASON_TH.get(reason, reason)} (คิว {qth}) → เสนอทางเลือก: ฝาก voicemail / ขอให้โทรกลับ",
+                     reason=reason, mailbox=box, queue=f"q-{box}")
+        if kind == "voicemail":
+            return s("fallback_voicemail", "customer", "voicemail", f"ช่วยโอนไป Voicemail ของคิว {qth} — ลูกค้าเลือกฝากข้อความเสียง",
+                     mailbox=box, queue=f"q-{box}")
+        if kind == "callback":
+            slot = CALLBACK_SLOTS.get(e.get("Slot", ""), e.get("Slot", ""))
+            return s("fallback_callback", "customer", "callback",
+                     f"ลูกค้าขอให้โทรกลับเบอร์ {e.get('Number')} ช่วง{slot} (เรื่อง {qth})",
+                     number=e.get("Number"), slot=e.get("Slot"), slot_label=slot, mailbox=box, queue=f"q-{box}")
+        return None
     if n == "QueueCallerJoin":
         return s("queue_join", "ivr", "queue", f"เข้าคิว {qth} (ลำดับที่ {e.get('Position')})", queue=q, position=e.get("Position"))
     if n == "AgentCalled":
@@ -147,8 +166,17 @@ def summarize(call_id: str, steps: list[dict]) -> dict:
     queues, agents, transfers, digits = [], [], [], []
     result = "IN_PROGRESS"
     ended = any(s["kind"] == "call_end" for s in steps)
+    fallback = fallback_reason = callback = None
     for s in steps:
         d = s["detail"]
+        if s["kind"] == "fallback_offer":
+            fallback_reason = d.get("reason")
+            if d.get("queue") not in queues:
+                queues.append(d["queue"])
+        if s["kind"] == "fallback_voicemail":
+            fallback = "voicemail"
+        if s["kind"] == "fallback_callback":
+            fallback, callback = "callback", {"number": d.get("number"), "slot": d.get("slot"), "slot_label": d.get("slot_label")}
         if s["kind"] == "queue_join" and d.get("queue") not in queues:
             queues.append(d["queue"])
         if s["kind"] == "agent_answer" and d.get("agent") not in agents:
@@ -161,10 +189,16 @@ def summarize(call_id: str, steps: list[dict]) -> dict:
         if s["kind"] == "outbound_result":
             result = d.get("result") or result
     if direction == "inbound":
-        if any(s["kind"] == "abandon" for s in steps):
+        if fallback == "voicemail":
+            result = "VOICEMAIL"
+        elif fallback == "callback":
+            result = "CALLBACK"
+        elif any(s["kind"] == "abandon" for s in steps):
             result = "ABANDONED"
         elif agents:
             result = "ANSWERED" if ended else "TALKING"
+        elif fallback_reason == "after_hours" and ended:
+            result = "AFTER_HOURS"
         elif ended:
             result = "NO_AGENT"
     elif ended and result == "IN_PROGRESS":
@@ -176,6 +210,7 @@ def summarize(call_id: str, steps: list[dict]) -> dict:
         "start": steps[0]["ts"], "end": steps[-1]["ts"] if ended else None,
         "duration": round(_secs(steps[0]["ts"], steps[-1]["ts"])), "steps": len(steps),
         "ivr_digits": digits, "queues": queues, "agents": agents, "transfers": transfers, "result": result,
+        "fallback": fallback, "fallback_reason": fallback_reason, "callback": callback,
     }
 
 
@@ -207,3 +242,21 @@ def get_call(call_id: str) -> dict | None:
     for st in steps:
         st["t"] = round(_secs(t0, st["ts"]), 1)
     return {"summary": summarize(call_id, steps), "steps": steps}
+
+
+# ---------------- callback worklist status (the CDR only knows the request, not whether it was handled) ----------------
+def callback_statuses() -> dict[str, dict]:
+    with _lock:
+        return {r[0]: {"status": r[1], "note": r[2], "ts": r[3]}
+                for r in _db().execute("SELECT call_id, status, note, ts FROM callback_status")}
+
+
+def set_callback_status(call_id: str, status: str, note: str | None = None) -> dict:
+    ts = datetime.now().astimezone().isoformat(timespec="seconds")
+    with _lock:
+        c = _db()
+        c.execute("INSERT INTO callback_status(call_id, status, note, ts) VALUES (?,?,?,?) "
+                  "ON CONFLICT(call_id) DO UPDATE SET status=excluded.status, note=excluded.note, ts=excluded.ts",
+                  (call_id, status, note, ts))
+        c.commit()
+    return {"call_id": call_id, "status": status, "note": note, "ts": ts}

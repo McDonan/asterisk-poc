@@ -32,5 +32,22 @@ EOF
     done
 fi
 
-mkdir -p /var/spool/asterisk/monitor /var/log/asterisk
+mkdir -p /var/spool/asterisk/monitor /var/spool/asterisk/voicemail /var/log/asterisk
+
+# cdr_sqlite3_custom only creates the table once: add columns that were introduced later (keeps old volumes working)
+if [ -f /var/log/asterisk/master.db ] && [ -f /etc/asterisk/cdr_sqlite3_custom.conf ]; then
+    python3 - <<'PY'
+import re, sqlite3
+conf = open("/etc/asterisk/cdr_sqlite3_custom.conf").read()
+want = [c.strip() for c in re.search(r"^columns\s*=>\s*(.+)$", conf, re.M).group(1).split(",")]
+db = sqlite3.connect("/var/log/asterisk/master.db")
+have = {r[1] for r in db.execute("pragma table_info(cdr)")}
+if have:
+    for c in want:
+        if c not in have:
+            db.execute(f"alter table cdr add column {c} varchar(80)")
+            print("cdr: added column", c)
+    db.commit()
+PY
+fi
 exec "$@"

@@ -10,6 +10,7 @@ API_KEY = os.getenv("API_KEY", "poc-api-key")
 CDR_DB = os.getenv("CDR_DB", "/pbx-log/master.db")
 QUEUE_LOG = os.getenv("QUEUE_LOG", "/pbx-log/queue_log")
 REC_DIR = os.getenv("REC_DIR", "/pbx-monitor")
+VM_DIR = os.getenv("VM_DIR", "/pbx-voicemail")
 
 # CRM integration demo: AgentConnect -> HTTP POST (screen pop). Defaults to the built-in mock CRM.
 CRM_WEBHOOK_URL = os.getenv("CRM_WEBHOOK_URL", "http://localhost:8000/mock-crm/screenpop")

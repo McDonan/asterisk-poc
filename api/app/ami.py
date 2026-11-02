@@ -81,9 +81,10 @@ class AmiService:
         evt.update({k: v for k, v in dict(message).items() if k not in NOISE_KEYS and k != "Event"})
         if name == "UserEvent":
             # AMI eventfilter hides Newexten, so the dialplan announces each IVR prompt with a UserEvent
-            if evt.get("UserEvent") != "IvrPrompt":
+            # (and the voicemail / callback fallback with UserEvent(Fallback,...))
+            if evt.get("UserEvent") not in ("IvrPrompt", "Fallback"):
                 return
-            evt["event"] = name = "IvrPrompt"
+            evt["event"] = name = evt["UserEvent"]
         self._publish(evt)
         if name == "Hold":
             self.held.add(evt.get("Channel", ""))

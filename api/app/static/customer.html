@@ -30,6 +30,7 @@
       <button class="danger" id="hang" disabled>วางสาย</button>
       <button id="del" title="ลบ">⌫</button>
     </div>
+    <div class="actions" style="grid-template-columns:1fr;margin-top:10px"><button id="mic" title="ปิดไว้เป็นค่าเริ่มต้น เปิดเมื่อใช้หูฟังหรือคนละเครื่องกับ agent"></button></div>
   </div>
   <div class="hint" id="hint"></div>
   <audio id="remote" autoplay></audio>
@@ -46,7 +47,7 @@ const PROMPT = { 'th-welcome': 'ข้อความต้อนรับ', 'th
 const STAGE = { ivr: 'ฟังเมนู IVR', queue: 'รอเจ้าหน้าที่ (เข้าคิว)', talking: 'กำลังสนทนา', hold: 'เจ้าหน้าที่พักสาย' };
 const player = new IvrPlayer();
 let mode = 'real', number = null, phone = null, hbT = null, pollT = null, reg = 'connecting';
-let typed = '', lastPrompt = '', remoteCall = null, incoming = null, simDialing = 0, snapCall = null, gen = 0;
+let micOn = false, typed = '', lastPrompt = '', remoteCall = null, incoming = null, simDialing = 0, snapCall = null, gen = 0;
 
 function inCall() {
   if (mode === 'real') return phone && ['calling', 'ringing', 'talking', 'hold'].includes(phone.call.state);
@@ -73,6 +74,8 @@ function render() {
   $('#hang').disabled = !(ringing || call);
   $('#hang').textContent = ringing ? 'ปฏิเสธ' : 'วางสาย';
   $('#del').disabled = call || ringing;
+  $('#mic').style.display = mode === 'real' ? '' : 'none';
+  $('#mic').textContent = micOn ? '🎤 ไมค์: เปิด (กดเพื่อปิด)' : '🔇 ไมค์: ปิด (กดเพื่อเปิด)';
   const dot = { registered: 'ok', connecting: 'warn', failed: 'err', unregistered: 'err', offline: '' }[reg] || '';
   $('#reg').innerHTML = `<span class="dot ${dot}"></span>${mode === 'real' ? 'SIP ' + reg : 'โหมดจำลอง'}`;
 }
@@ -97,7 +100,7 @@ async function begin(newMode) {
   if (mode === 'real') {
     phone = new Softphone({
       server: `ws://${location.hostname}:${cfg.sim_ws_port}/ws`, domain: location.hostname, user: number, password: c.password,
-      displayName: `Customer ${number}`, audio: $('#remote'),
+      displayName: `Customer ${number}`, audio: $('#remote'), muted: !micOn,
       onRegistration: s => { reg = s; render(); },
       onCall: ci => { if (ci.error) toast('สายไม่สำเร็จ: ' + ci.error, 'err'); render(); },
     });
@@ -133,6 +136,7 @@ watchEvents(e => {
   lastPrompt = (e.Prompt || '').trim(); player.play(lastPrompt); render();
 });
 
+$('#mic').onclick = () => { micOn = !micOn; if (phone) phone.mute(!micOn); render(); };
 $('#keys').addEventListener('click', async ev => {
   const b = ev.target.closest('button'); if (!b) return;
   const k = b.dataset.k;

@@ -11,6 +11,7 @@ from datetime import datetime
 from pathlib import Path
 
 from . import config
+from .store import _outbound_result
 from .labels import CALLBACK_SLOTS, FALLBACK_REASON_TH, IVR_MENU, MODULES, PROMPT_TH, QUEUE_TH
 
 log = logging.getLogger("timeline")
@@ -67,7 +68,7 @@ def _step(e: dict) -> tuple[str, dict] | None:
     if n == "IvrPrompt":
         p = e.get("Prompt", "").strip()
         return s("ivr_prompt", "ivr", "customer", f"IVR เล่นเสียง: {PROMPT_TH.get(p, p)}", prompt=p)
-    if n == "DTMFEnd" and e.get("Direction") == "Received" and TRUNK_CHAN.match(ch) and e.get("Context", "ivr-main") == "ivr-main":
+    if n == "DTMFEnd" and e.get("Direction") == "Received" and TRUNK_CHAN.match(ch) and e.get("Context", "ivr-main") == "ivr-main" and e.get("ivr_listening", True):
         d = e.get("Digit", "")
         label = IVR_MENU.get(d, {}).get("th", "")
         return s("ivr_digit", "customer", "ivr", f"ลูกค้ากด {d}" + (f" = {label}" if label else ""), digit=d, service=label)
@@ -126,6 +127,14 @@ def _step(e: dict) -> tuple[str, dict] | None:
     if n == "DialBegin" and (e.get("DestChannel") or "").startswith("PJSIP/trunk-") and _agent(ch):
         dialed = (e.get("DialString") or "").split("@")[0]
         return s("outbound_dial", "pjsip", "carrier", f"โทรออกไปยัง {dialed} ผ่าน carrier", dialed=dialed, agent=_agent(ch))
+    if n == "DialBegin" and _agent(ch) and _agent(e.get("DestChannel")):
+        dialed = _agent(e.get("DestChannel"))
+        return s("outbound_dial", "agent", "agent", f"Agent {_agent(ch)} โทรหา Agent {dialed}", dialed=dialed, agent=_agent(ch))
+    if n == "DialEnd" and _agent(ch) and _agent(e.get("DestChannel")):
+        dialed, st = _agent(e.get("DestChannel")), e.get("DialStatus")
+        res = _outbound_result(st, None)
+        return s("outbound_result", "agent", "agent", f"ผลการโทรหา Agent {dialed}: {res}",
+                 dialed=dialed, result=res, dial_status=st)
     if n == "OutboundDialResult":
         return s("outbound_result", "carrier", "agent", f"ผลการโทรออก {e.get('dialed')}: {e.get('result')}",
                  dialed=e.get("dialed"), result=e.get("result"), dial_status=e.get("dial_status"))

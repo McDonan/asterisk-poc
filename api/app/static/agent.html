@@ -52,7 +52,7 @@
 $('#nav').outerHTML = nav('/demo/agent');
 const STATE_TH = { idle: 'พร้อมรับสาย', busy: 'กำลังคุยสาย', ringing: 'สายเข้า', paused: 'พักอยู่', logged_out: 'ออกจากคิว', offline: 'ออฟไลน์' };
 const RESULT_TH = { CONNECTED: 'ติดต่อได้ (ลูกค้ารับสาย)', BUSY: 'ลูกค้าไม่ว่าง / ปฏิเสธสาย', NO_ANSWER: 'ไม่มีผู้รับสาย', CANCELLED: 'Agent ยกเลิก', FAILED: 'ติดต่อไม่ได้ (เบอร์ไม่พร้อมใช้งาน)' };
-let ext = null, kind = null, phone = null, reg = 'offline', S = null, expectOut = 0, talkSince = 0, muted = false;
+let ext = null, kind = null, phone = null, reg = 'offline', S = null, expectOut = 0, talkSince = 0;
 const params = new URLSearchParams(location.search);
 
 const agentRow = () => S && S.agents.find(a => a.extension === ext);
@@ -63,7 +63,7 @@ function view() {                  // unified call view for web (SIP.js) and sim
     return { st: s === 'incoming' ? 'incoming' : s === 'talking' ? 'talking' : s === 'hold' ? 'hold' : ['calling', 'ringing'].includes(s) ? 'dialing' : 'idle',
              who: phone.call.remote, info: c };
   }
-  if (a && a.sim_ringing) return { st: 'incoming', who: '', info: c };
+  if (a && (a.sim_ringing || a.queue_ringing)) return { st: 'incoming', who: '', info: c };
   if (c && ['talking', 'hold'].includes(c.stage)) return { st: c.stage, who: c.number, info: c };
   if (c && c.direction === 'outbound') return { st: 'dialing', who: c.number, info: c };
   return { st: 'idle', who: '', info: null };
@@ -92,6 +92,7 @@ function render() {
   $('#b-ans').disabled = $('#b-rej').disabled = v.st !== 'incoming';
   $('#b-hold').disabled = !live; $('#b-hold').textContent = v.st === 'hold' ? 'กลับมาคุย' : 'พักสาย';
   $('#b-mute').disabled = !(live && kind === 'web');
+  $('#b-mute').textContent = phone && phone.muted ? 'เปิดไมค์' : 'ปิดไมค์';
   $('#b-hang').disabled = !(live || v.st === 'dialing');
   $('#tsel').disabled = $('#b-xfer').disabled = !live;
   const ok = !!a && (kind !== 'web' || reg === 'registered');
@@ -127,7 +128,7 @@ async function pick(e) {
   ext = e; $('#sel').value = e;
   if (phone) { try { await phone.stop(); } catch (x) {} phone = null; }
   const a = S && S.agents.find(x => x.extension === e);
-  kind = a ? a.kind : null; reg = 'offline'; muted = false;
+  kind = a ? a.kind : null; reg = 'offline';
   history.replaceState(null, '', `?ext=${e}`);
   if (kind === 'sim') {
     if (S && !S.demo.enabled) { await api('/demo/enable', 'POST'); toast('เปิดโหมด demo แล้ว', 'ok'); }
@@ -174,7 +175,7 @@ $('#b-hold').onclick = () => {
   const on = view().st !== 'hold';
   if (kind === 'web') phone.hold(on).then(render); else api(`/demo/agent/${ext}/hold?on=${on}`, 'POST');
 };
-$('#b-mute').onclick = () => { muted = !muted; phone.mute(muted); $('#b-mute').textContent = muted ? 'เปิดไมค์' : 'ปิดไมค์'; };
+$('#b-mute').onclick = () => { phone.mute(!phone.muted); render(); };
 $('#b-hang').onclick = () => kind === 'web' ? phone.hangup() : api(`/agents/${ext}/hangup`, 'POST').catch(() => {});
 $('#b-xfer').onclick = async () => {
   const t = $('#tsel').value; if (!t) return;

@@ -17,6 +17,7 @@
 class Softphone {
   constructor(opt) {
     this.opt = opt;
+    this.muted = !!opt.muted;   // persists across calls; re-applied when media is established
     this.ua = null;
     this.registerer = null;
     this.session = null;
@@ -99,6 +100,7 @@ class Softphone {
       if (this.session !== session) return;
       if (s === SessionState.Established) {
         this._bindAudio(session);
+        this.mute(this.muted);
         this._set({ state: this.call.held ? 'hold' : 'talking' });
       } else if (s === SessionState.Terminated) {
         this.session = null;
@@ -132,7 +134,7 @@ class Softphone {
     if (this.session) throw new Error('already in a call');
     const uri = UserAgent.makeURI(`sip:${target}@${this.opt.domain}`);
     const inv = new Inviter(this.ua, uri, {
-      sessionDescriptionHandlerOptions: { constraints: { audio: true, video: false } },
+      sessionDescriptionHandlerOptions: { constraints: { audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true }, video: false } },
     });
     this._attach(inv, 'out', target);
     try {
@@ -153,7 +155,7 @@ class Softphone {
   async answer() {
     const s = this.session;
     if (!s || this.call.state !== 'incoming') return;
-    await s.accept({ sessionDescriptionHandlerOptions: { constraints: { audio: true, video: false } } });
+    await s.accept({ sessionDescriptionHandlerOptions: { constraints: { audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true }, video: false } } });
   }
 
   async reject() {
@@ -204,6 +206,7 @@ class Softphone {
   }
 
   mute(on) {
+    this.muted = !!on;
     const s = this.session;
     const pc = s && s.sessionDescriptionHandler && s.sessionDescriptionHandler.peerConnection;
     if (pc) pc.getSenders().forEach(x => { if (x.track) x.track.enabled = !on; });

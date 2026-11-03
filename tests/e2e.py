@@ -562,7 +562,7 @@ async def s11_fallback():
     await read_waiting(caller)
     await dtmf(cust, "3")
     await read_waiting(caller)      # number prompt
-    await dtmf(cust, other)
+    await dtmf(cust, other + "#")
     await read_waiting(caller)      # time slot prompt
     await dtmf(cust, "1")
     await wait_gone(cust, 30)

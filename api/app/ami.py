@@ -38,6 +38,7 @@ class AmiService:
         self.held: set[str] = set()              # channels currently on hold (demo page)
         self._trunk_dials: dict[str, str] = {}   # carrier-leg uniqueid -> dialed number
         self.listeners: list = []                # callables(evt) fed with every published event (timeline recorder)
+        self._menu_open: set[str] = set()        # Linkedids whose IVR menu (Background) is currently listening for digits
 
     # ---------- lifecycle ----------
     async def start(self) -> None:
@@ -85,6 +86,18 @@ class AmiService:
             if evt.get("UserEvent") not in ("IvrPrompt", "Fallback"):
                 return
             evt["event"] = name = evt["UserEvent"]
+        lid = evt.get("Linkedid") or evt.get("Uniqueid") or ""
+        if name == "IvrPrompt":
+            if evt.get("Prompt", "").strip() == "th-menu":
+                self._menu_open.add(lid)
+            else:
+                self._menu_open.discard(lid)
+        elif name == "Hangup":
+            self._menu_open.discard(lid)
+        elif name == "DTMFEnd" and evt.get("Direction") == "Received" and evt.get("Context") == "ivr-main":
+            # digits pressed during the welcome Playback are dropped by Asterisk, so they are not real choices
+            evt["ivr_listening"] = lid in self._menu_open
+            self._menu_open.discard(lid)
         self._publish(evt)
         if name == "Hold":
             self.held.add(evt.get("Channel", ""))

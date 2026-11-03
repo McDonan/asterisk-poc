@@ -104,7 +104,7 @@ class Sim:
                 self.menu_ready.discard(who)
         elif n in ("QueueCallerJoin", "Hangup"):
             self.menu_ready.discard(who)
-        elif n == "DTMFEnd" and e.get("Direction") == "Received":
+        elif n == "DTMFEnd" and e.get("Direction") == "Received" and (e.get("Context") or "") == "ivr-main":
             self.menu_ready.discard(who)
 
     # ---------- ARI plumbing ----------
@@ -382,6 +382,7 @@ def _need_demo() -> Sim:
 @router.post("/enable", dependencies=auth)
 async def enable():
     from . import main as m
+    sim.auto = True
     sim.start()
     for ext in AGENTS:                              # agents log in to all queues and are available
         await m.agent_login(ext)
@@ -389,13 +390,14 @@ async def enable():
             await m.agent_pause(ext, False)
         except HTTPException:
             pass
-    return {"enabled": True}
+    return {"enabled": True, "auto": sim.auto}
 
 
 @router.post("/disable", dependencies=auth)
 async def disable():
+    sim.auto = False
     await sim.stop()
-    return {"enabled": False}
+    return {"enabled": False, "auto": sim.auto}
 
 
 class InboundBody(BaseModel):
@@ -645,6 +647,31 @@ def _agent_state(a: dict) -> str:
     return "idle"
 
 
+def _ext_from_event(e: dict) -> str | None:
+    ch = e.get("Channel", "") or e.get("Interface", "")
+    m = AGENT_CHAN.match(ch)
+    if m:
+        return m.group(1)
+    iface = (e.get("Interface") or "").split("/")[-1]
+    return iface or None
+
+
+def _queue_ring_state(ext: str) -> bool:
+    """Return whether the queue recently called this agent and the call has not yet connected or timed out."""
+    for e in reversed(ami.recent):
+        event = e.get("event")
+        if event == "AgentConnect":
+            if _ext_from_event(e) == ext:
+                return False
+        elif event == "AgentRingNoAnswer":
+            if _ext_from_event(e) == ext:
+                return False
+        elif event == "AgentCalled":
+            if _ext_from_event(e) == ext:
+                return True
+    return False
+
+
 def _event_text(e: dict) -> tuple[str, str] | None:
     n, ch = e["event"], e.get("Channel", "")
     e = {**e, "Queue": QUEUE_TH.get(e.get("Queue"), e.get("Queue"))}
@@ -655,6 +682,8 @@ def _event_text(e: dict) -> tuple[str, str] | None:
         p = e.get("Prompt", "").strip()
         return "ivr", f"IVR เล่นเสียง «{PROMPT_TH.get(p, p)}» ให้ {e.get('CallerIDNum')}"
     if n == "DTMFEnd" and e.get("Direction") == "Received" and ch.startswith("PJSIP/trunk-sim-"):
+        if (e.get("Context") or "") != "ivr-main" or not e.get("ivr_listening", True):
+            return None
         label = IVR_MENU.get(e.get("Digit"), {}).get("th")
         return "ivr", f"ลูกค้า {e.get('CallerIDNum')} กด {e.get('Digit')}" + (f" ({label})" if label else "")
     if n == "QueueCallerJoin":
@@ -712,6 +741,7 @@ async def state():
                        "name": web[ext]["name"] if ext in web else f"Agent {ext}",
                        "registered": a["registered"], "logged_in": bool(a["queues"]),
                        "sim_ringing": sim.ringing(ext),
+                       "queue_ringing": _queue_ring_state(ext),
                        "call": next((c for c in calls if c["agent"] == ext), None),
                        "calls_taken": max((q["calls_taken"] for q in a["queues"].values()), default=0)})
     events = [{"ts": e["ts"], "kind": k, "text": t} for e in list(ami.recent)[-400:] if (r := _event_text(e)) for k, t in [r]]

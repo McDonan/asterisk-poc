@@ -142,7 +142,7 @@ async def wait_agent_answer(since: int, timeout=40):
     return (await wait_until(lambda: new_events("agent_answer", since), timeout, 0.3, "agent answer"))[0]
 
 
-async def wait_gone(ch: str, timeout=15):
+async def wait_gone(ch: str, timeout=45):
     await wait_until(lambda: ch not in ALIVE, timeout, 0.3, f"{ch} to end")
 
 

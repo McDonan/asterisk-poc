@@ -11,7 +11,7 @@ flowchart TB
     subgraph L5["5. Business apps"]
         CRM["CRM / Agent Desktop"]:::todo
         DASH["Supervisor dashboard / reports"]:::todo
-        DEMO["Exec demo page<br/>api/app/static/demo.html"]:::done
+        DEMO["Demo pages: customer, agent, dashboard,<br/>transactions, inbox, flow<br/>api/app/static/*.html"]:::done
         MOCK["Mock CRM screen-pop"]:::sim
     end
     subgraph L4["4. Integration layer"]
@@ -23,7 +23,7 @@ flowchart TB
     subgraph L2["2. Endpoints"]
         SOFT["Agent softphones 1001-1003"]:::sim
         SIMAG["Simulated agents 1101-1103"]:::sim
-        WEBRTC["Browser phone (WebRTC)"]:::todo
+        WEBRTC["Browser phones (SIP.js, WebRTC)<br/>agent + customer pages"]:::done
     end
     subgraph L1["1. Outside world"]
         SIMCAR["Simulated carrier + customers<br/>sim/etc"]:::sim
@@ -52,19 +52,35 @@ Core of [asterisk/etc/extensions.conf](../asterisk/etc/extensions.conf). Each bo
 
 ```mermaid
 flowchart LR
-    IN(["Inbound call<br/>from the trunk"]) --> FT["from-trunk<br/>DID 8000"]
+    IN(["Inbound call<br/>from the trunk"]) --> FT["from-trunk<br/>DID 1484"]
     FT --> IVR["ivr-main<br/>Thai welcome, wait for DTMF<br/>25 s x 3 tries"]
-    IVR -- "1" --> QC["queue-flow: q-claim"]
-    IVR -- "2" --> QP["queue-flow: q-policy"]
-    IVR -- "0" --> QG["queue-flow: q-general"]
+    IVR -- "1 accident 24h" --> Q1["queue-flow: q-accident"]
+    IVR -- "2 other incidents" --> Q2["queue-flow: q-incident"]
+    IVR -- "3 motor inquiry" --> Q3["queue-flow: q-motor"]
+    IVR -- "4 other insurance" --> Q4["queue-flow: q-insurance"]
+    IVR -- "5 buy insurance" --> Q5["queue-flow: q-sales"]
+    IVR -- "6 Muang Thai Friends Club" --> Q6["queue-flow: q-club"]
     IVR -- "9" --> IVR
     IVR -- "other key (i)" --> IVR
-    QC --> REC["sub-record<br/>MixMonitor 'b'<br/>CDR(recording)"]
-    QP --> REC
-    QG --> REC
+    Q1 --> REC["sub-record<br/>MixMonitor 'b'<br/>CDR(recording)"]
+    Q2 --> REC
+    Q3 --> REC
+    Q4 --> REC
+    Q5 --> REC
+    Q6 --> REC
     REC --> AG["Queue(): MOH while waiting,<br/>ring Agent (leastrecent)"]
     AG --> TALK(["Agent talks<br/>Hold / Transfer / Hangup"])
-    AG -. "no agent" .-> NOAG["th-noagent, hangup"]
+    AG -- "agent hangs up (option c)" --> RATE["Rating prompt th-rate<br/>1-5, CDR(rating)"]
+    RATE --> BYE(["th-goodbye, hangup"])
+    Q1 -. "closed (not q-accident)" .-> FB
+    Q2 -. "closed" .-> FB
+    Q3 -. "closed" .-> FB
+    Q4 -. "closed" .-> FB
+    Q5 -. "closed" .-> FB
+    Q6 -. "closed" .-> FB
+    AG -. "no agent / timeout 120 s" .-> FB["fallback<br/>th-closed or th-noagent"]
+    FB -- "1" --> VM["VoiceMail(queue box)"]
+    FB -- "2 / 3 + time slot 1-3" --> CB["CDR callback_number, callback_slot"]
 
     OUT(["Agent dials 9 + number<br/>or API click-to-call"]) --> FI["from-internal"]
     FI --> SO["sub-outbound<br/>CDR direction=outbound<br/>MixMonitor 'b'"]
@@ -72,7 +88,9 @@ flowchart LR
     TR --> HH["sub-outbound-hangup<br/>CDR: dial_status, hangup_cause"]
 ```
 
-Also in `from-internal`: `*45` / `*46` / `*47` / `*48` = queue login / logout / pause / unpause, `600` / `601` = echo and test tone, `1XXX` = agent to agent.
+`sub-hours` sets `IS_OPEN` (Mon-Fri 08:30-17:30 Asia/Bangkok, or the `HOURS_OVERRIDE` global set via `POST /hours`); `q-accident` skips the check (24 h). The `fallback` context writes `CDR(fallback, fallback_reason, fallback_queue, callback_number, callback_slot)` and publishes `UserEvent(Fallback)`; the rating prompt publishes `UserEvent(AgentRating)`.
+
+Also in `from-internal`: `*45` / `*46` / `*47` / `*48` = queue login / logout / pause / unpause, `600` / `601` = echo and test tone, `1XXX` = agent to agent, `*97` = listen to voicemail (mailbox password `1234`), `q-*` = blind-transfer target into a queue.
 
 ## 3. Sequence: one inbound call end to end
 
@@ -85,11 +103,11 @@ sequenceDiagram
     participant Ag as Agent
     participant A as API (AMI)
     participant C as CRM
-    Cu->>Ca: dials 8000
+    Cu->>Ca: dials 1484
     Ca->>P: SIP INVITE (trunk)
     P-->>Cu: Thai IVR prompt (RTP)
-    Cu->>P: DTMF "1"
-    P->>P: queue q-claim, start MixMonitor
+    Cu->>P: DTMF "3"
+    P->>P: queue q-motor (digit 3), start MixMonitor
     P-->>Cu: Music on Hold
     P->>Ag: ring (leastrecent member)
     Ag->>P: answer
@@ -97,8 +115,10 @@ sequenceDiagram
     A->>C: webhook screen-pop
     Note over Cu,Ag: conversation, recorded to a WAV file
     Ag->>P: Hold / blind transfer (via API or softphone)
+    Ag--xP: agent hangs up
+    P-->>Cu: rating prompt (th-rate), customer presses 1-5
     Cu--xP: hangup
-    P->>P: write CDR + recording path
+    P->>P: write CDR (+ rating) + recording path
     P-->>A: Cdr event
     A-->>A: build "call history" (IVR, queue, agent, wait/talk, result)
 ```
@@ -132,22 +152,79 @@ sequenceDiagram
     P-->>A: event OutboundDialResult + CDR
 ```
 
-## 5. What the demo page does
+## 5. What the demo pages do
 
 ```mermaid
 flowchart LR
-    B["Presenter clicks<br/>in the browser"] --> D["api/app/demo.py<br/>(ARI client)"]
+    B["Browser pages<br/>customer / agent"] -- "real mode: SIP.js over WebRTC" --> P
+    B -- "simulated mode: REST" --> D["api/app/demo.py<br/>(ARI client)"]
     D -- "ARI: originate, DTMF,<br/>answer, hold, hangup" --> S["sim Asterisk<br/>fake carrier + customers<br/>+ agents 1101-1103"]
     S -- "SIP/RTP" --> P["Real PBX<br/>IVR, queue, recording, CDR"]
-    P -- "AMI events" --> A["API state<br/>(calls, KPI, history)"]
-    A --> B
+    P -- "AMI events" --> A["API state + timeline.db<br/>(calls, KPI, steps)"]
+    A -- "dashboard / transactions / flow" --> V["Browser: supervisor pages"]
     classDef sim fill:#fff3cd,stroke:#b58900,color:#000
     classDef done fill:#d4f4dd,stroke:#2e7d32,color:#000
     class S,D sim
     class P,A done
 ```
 
-Only the people are fake (customer, carrier, agents). The PBX behaviour shown (IVR, queue, hold, transfer, CDR, events) comes from the real Asterisk.
+In simulated mode only the people are fake (customer, carrier, agents). In real mode the browser is the phone: agents register to the PBX (`ws://localhost:8088/ws`, ext 12xx) and customers register to the carrier simulator (`ws://localhost:8089/ws`, numbers `0800000001` to `0800000020`) and call 1484 over the trunk. The PBX behaviour shown (IVR, queue, hold, transfer, CDR, events) always comes from the real Asterisk.
+
+### 5.1 Module map: which module talks to which, step by step
+
+Same graph as the live page `/demo/flow` (step numbers match). Solid = call path, dotted = support / data path.
+
+```mermaid
+flowchart LR
+    CUS["Customer<br/>web phone / phone"]
+    CAR["Carrier / SIP trunk<br/>sim Asterisk"]
+    PJ["PBX: PJSIP<br/>from-trunk 1484"]
+    IVR["Dialplan: IVR<br/>ivr-main, menu 1-6"]
+    Q["app_queue<br/>queue-flow"]
+    AG["Agent<br/>web phone / softphone"]
+    REC["MixMonitor<br/>.wav"]
+    CDR["CDR + queue_log"]
+    API["Integration API<br/>FastAPI, AMI, timeline"]
+    CRM["CRM / Dashboard / Transactions"]
+
+    CUS -- "1 SIP INVITE (WS :8089 / UDP)" --> CAR
+    CAR -- "2 SIP trunk UDP 5060" --> PJ
+    PJ -- "3 Answer, Playback, BackGround" --> IVR
+    IVR -- "4 DTMF 1-6, Goto queue-flow" --> Q
+    Q -- "5 Dial PJSIP/ext" --> AG
+    AG -- "6 bridge, MixMonitor(b)" --> REC
+    REC -- "7 file + CDR row" --> CDR
+    AG -- "11 REFER / BlindTransfer" --> Q
+    PJ -. "8 AMI events :5038" .-> API
+    API -. "9 REST, WS, webhook" .-> CRM
+    CDR -. "10 read history / recordings" .-> API
+    CRM -. "O1 POST /demo/outbound" .-> API
+    API -. "O2 AMI Originate agent" .-> PJ
+    PJ -. "O3 sub-outbound, Dial trunk-sim" .-> CAR
+    CAR -. "O4 INVITE customer: answer / reject / no answer" .-> CUS
+```
+
+Data stores: `timeline.db` (one row per step of every call, written from AMI events, volume `api-data`), `agents.json` (agents added at runtime, same volume), callback handled status (same `timeline.db`), `pjsip_agents.conf` (rendered by the API into volume `pbx-dyn`, `#tryinclude`d by the PBX; adding or removing an agent = rewrite + `module reload res_pjsip.so` + `QueueAdd`/`QueueRemove` on all 6 queues).
+
+Only the people are fake in simulated mode.
+
+### 5.2 Fallback: after hours / no agent
+
+```mermaid
+flowchart LR
+    Q["queue-flow"] --> H{"open?<br/>sub-hours"}
+    H -- "yes" --> QU["Queue 120 s"]
+    QU -- "answered" --> RATE["rating 1-5"]
+    QU -- "no agent / timeout" --> FB
+    H -- "no (not q-accident)" --> FB["fallback<br/>th-closed / th-noagent"]
+    FB -- "1" --> VM["Voicemail<br/>/var/spool/asterisk/voicemail"]
+    FB -- "2 own number / 3 other number" --> SL["time slot 1-3"] --> CBK["CDR callback_*"]
+    VM --> API["API: /voicemail, /callbacks,<br/>/transactions (result VOICEMAIL / CALLBACK)"]
+    CBK --> API
+    API --> INB["/demo/inbox<br/>listen, mark callback done, set hours"]
+```
+
+Callback handled status (`pending` / `done`, note) is stored in `timeline.db`; voicemail and CDR volumes are mounted read-only into the API (`pbx-voicemail`, `pbx-log`).
 
 ## 6. Checklist
 
@@ -157,15 +234,20 @@ Only the people are fake (customer, carrier, agents). The PBX behaviour shown (I
 |---|---|
 | SIP endpoints, trunk, NAT/RTP settings | [pjsip.conf](../asterisk/etc/pjsip.conf), [rtp.conf](../asterisk/etc/rtp.conf) |
 | IVR (Thai prompts, DTMF, retry/invalid/repeat) | `ivr-main` in [extensions.conf](../asterisk/etc/extensions.conf) |
-| Queues (3 skills, leastrecent) and hold music | [queues.conf](../asterisk/etc/queues.conf), [musiconhold.conf](../asterisk/etc/musiconhold.conf) |
+| Queues (6 services of the MTI 1484 menu, leastrecent) and hold music | [queues.conf](../asterisk/etc/queues.conf), [musiconhold.conf](../asterisk/etc/musiconhold.conf) |
 | Recording (inbound and outbound) | `sub-record` + `MixMonitor(b)` |
-| CDR with custom fields (IVR choice, agent, recording, dial status) | [cdr_sqlite3_custom.conf](../asterisk/etc/cdr_sqlite3_custom.conf) |
+| CDR with custom fields (IVR choice, agent, recording, dial status, rating, fallback, callback number / slot) | [cdr_sqlite3_custom.conf](../asterisk/etc/cdr_sqlite3_custom.conf) |
 | Outbound with result classification | `sub-outbound`, `sub-outbound-hangup` |
 | API: agents, queues, active calls, history, CDR, recordings, events (REST + WebSocket) | [api/app](../api/app) |
 | Agent actions via API: login, logout, pause, transfer, hangup, click-to-call | [main.py](../api/app/main.py) |
 | CRM screen-pop webhook (mock) | `/mock-crm/screenpop` |
-| Exec demo page | [demo.html](../api/app/static/demo.html), [demo.py](../api/app/demo.py) |
-| Automated tests (42 checks, scenarios S0 to S7) | [tests/e2e.py](../tests/e2e.py) |
+| Demo pages: customer keypad, agent, dashboard, transactions, voicemail / callback inbox, flow map | [static](../api/app/static), [demo.py](../api/app/demo.py) |
+| Real WebRTC softphones (SIP.js, vendored) for agent and customer | [softphone.js](../api/app/static/softphone.js), `webrtc-*` templates in [pjsip.conf](../asterisk/etc/pjsip.conf) |
+| Call timeline with transfer targets (`/transactions`) | [timeline.py](../api/app/timeline.py) |
+| Add / remove agents at runtime, concurrent customers | [agents_admin.py](../api/app/agents_admin.py), `/demo/inbound/batch` |
+| IVR rating of the agent (1-5) stored in `CDR(rating)` | `queue-flow` (option `c`), [store.py](../api/app/store.py) |
+| Business hours, voicemail and callback request fallback (after hours / no agent / queue timeout), 24 h accident hotline | `sub-hours`, `fallback` in [extensions.conf](../asterisk/etc/extensions.conf), [voicemail.conf](../asterisk/etc/voicemail.conf), `/hours` `/voicemail` `/callbacks` in [main.py](../api/app/main.py), page `/demo/inbox` |
+| Automated tests (scenarios S0 to S11) | [tests/e2e.py](../tests/e2e.py) |
 
 ### B. Simulated now: create or configure for production
 
@@ -175,18 +257,18 @@ Only the people are fake (customer, carrier, agents). The PBX behaviour shown (I
 | Agent phones | Decide: softphone, desk phone or WebRTC. Create real endpoints and credentials per agent. |
 | Network | Public IP/NAT (`media_address`, `external_*`), firewall for 5060 and the RTP range, SBC if needed. |
 | Security | Change all lab passwords, use TLS/SRTP, lock down AMI/ARI, real API authentication (JWT/SSO). |
-| Database | CDR is SQLite on a volume. Move to PostgreSQL/MySQL with backups. |
+| Database | CDR is SQLite on a volume (new columns are added automatically by `entrypoint.sh`). Move to PostgreSQL/MySQL with backups. |
 | Recording storage | Shared or object storage, retention, encryption, access audit, PDPA rules. |
 | CRM integration | Replace the mock webhook with the real CRM API. |
-| Prompts and hold music | Professional Thai prompts and real MOH (current ones are POC-generated). |
-| Business rules | Real queue strategy, SLA, business hours, holiday routing, overflow and timeout behaviour. |
+| Prompts and hold music | Professional Thai prompts and real MOH (current ones are POC-generated neural TTS, see `tools_gen_neural.py`). |
+| Business rules | Real queue strategy, SLA, holiday calendar (the POC has Mon-Fri hours only), overflow behaviour. Callback requests are a list only: no automatic dialing back, no voicemail e-mail or notification. |
 | Transfer rules | `POST /agents/{ext}/transfer` does a direct blind transfer and ignores agent pause state. Add a state check or transfer through queues. |
 
 ### C. Not built (gaps for the report)
 
 | Gap | Note |
 |---|---|
-| Agent Desktop UI (browser softphone, wrap-up codes) | Frontend work, typically WebRTC with JsSIP or SIP.js. |
+| Production Agent Desktop (wrap-up codes, CRM panel, TURN for remote agents) | The POC agent page is a minimal SIP.js phone; production needs a real UI, TURN/ICE and TLS (`wss`). |
 | Supervisor tools: listen, whisper, barge | Asterisk supports `ChanSpy`; UI not built. |
 | Historical reports (SLA, ASA, AHT, abandon rate) | Data exists in CDR and queue_log; dashboards not built. |
 | Auto/predictive dialer, campaigns, call lists, DNC | Out of scope of the POC. |
@@ -370,7 +452,7 @@ flowchart LR
         P3["sim (Asterisk): fake carrier + agents"]
         P4["SQLite CDR + local recording folder"]
         P5["Mock CRM webhook"]
-        P6["demo.html"]
+        P6["demo pages (static/*.html)"]
     end
     subgraph PROD["Production"]
         R1["Asterisk x2 (HA)"]

@@ -1,0 +1,26 @@
+<!doctype html>
+<html lang="th"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>MTI 1484 Call Center POC</title><link rel="stylesheet" href="/static/common.css">
+<style> .cards { display:grid; grid-template-columns:repeat(auto-fit,minmax(260px,1fr)); gap:14px; } .cards a.panel { display:block; color:inherit; } .cards a.panel:hover { border-color:var(--accent); text-decoration:none; } .cards h3 { margin:0 0 6px; } ol li { margin:6px 0; } </style></head>
+<body>
+<header class="top"><h1>Asterisk POC — ศูนย์บริการลูกค้า 1484 (เมืองไทยประกันภัย)</h1><span id="nav"></span></header>
+<main>
+  <div class="cards">
+    <a class="panel" href="/demo/customer"><h3>1. หน้าจอลูกค้า</h3><span class="mut">keypad เท่านั้น — โทร 1484 ได้จริง (softphone SIP.js) หรือโหมดจำลอง รับสายโทรออกจากศูนย์ฯ ได้</span></a>
+    <a class="panel" href="/demo/agent"><h3>2. หน้าจอ Agent</h3><span class="mut">สถานะ พร้อม/พัก รับสาย พักสาย โอนสาย และปุ่มโทรออก</span></a>
+    <a class="panel" href="/demo/dashboard"><h3>3. Dashboard</h3><span class="mut">คิว agent สายสด เหตุการณ์สด เพิ่ม/ลบ agent ลูกค้าโทรพร้อมกัน</span></a>
+    <a class="panel" href="/demo/transactions"><h3>4. Transactions</h3><span class="mut">ไทม์ไลน์ละเอียดของแต่ละสาย รวมถึงโอนสายจากใครไปที่ไหน</span></a>
+    <a class="panel" href="/demo/flow"><h3>5. Flow Map</h3><span class="mut">แผนภาพ: แต่ละขั้นตอน module ไหนคุยกับ module ไหน (สด)</span></a>
+    <a class="panel" href="/docs"><h3>6. API (Swagger)</h3><span class="mut">REST / WebSocket สำหรับ CRM และ Agent application</span></a>
+  </div>
+  <div class="panel" style="margin-top:16px"><h2>ลองทำตามนี้ (ใช้ 2 แท็บ)</h2>
+    <ol>
+      <li>แท็บ A: เปิด <a href="/demo/dashboard">Dashboard</a> → กด "+ เพิ่ม Agent" เพื่อสร้าง Agent ใหม่ (หรือกด "เปิด Demo mode" เพื่อใช้ agent จำลอง)</li>
+      <li>แท็บ B: เปิด <a href="/demo/agent">Agent</a> → เลือก agent → กด "พร้อมรับสาย" (ต้องอนุญาตไมโครโฟน)</li>
+      <li>แท็บ C: เปิด <a href="/demo/customer">ลูกค้า</a> → กด 1484 → โทร → ฟังเมนู IVR แล้วกด 1-6</li>
+      <li>Agent รับสาย → พักสาย / โอนสายไปคิวอื่น → ดูไทม์ไลน์ที่ <a href="/demo/transactions">Transactions</a></li>
+      <li>Agent กรอกเบอร์ลูกค้า (เช่น 0800000001 ที่เปิดหน้า "ลูกค้า" ไว้) → โทรออก → ลูกค้ากดรับ/ปฏิเสธ/ปล่อยให้ไม่รับ</li>
+    </ol>
+  </div>
+</main>
+<script src="/static/common.js"></script><script>$('#nav').outerHTML = nav('/demo');</script></body></html>

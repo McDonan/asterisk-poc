@@ -1,7 +1,7 @@
 # สรุปผล POC: Asterisk เป็น Core Telephony ของ Call Center (MTI)
 
 เวอร์ชันที่ทดสอบ: Asterisk 22.11.0 (LTS, build จาก source, PJSIP) — รันด้วย Docker compose
-วิธีทดสอบ: E2E อัตโนมัติ [tests/e2e.py](../tests/e2e.py) (scenario S0–S7) ผลล่าสุด **42/42 checks ผ่าน**
+วิธีทดสอบ: E2E อัตโนมัติ [tests/e2e.py](../tests/e2e.py) (scenario S0–S10) ผลล่าสุด **55/55 checks ผ่าน** และทดสอบผ่านเบราว์เซอร์จริง (WebRTC, headless Chrome) ครบ: ลูกค้าโทร 1484 → IVR → คิว → Agent รับ → Hold → โอนไปคิวอื่น → วางสาย → Agent โทรออกหาลูกค้า (รับ/ปฏิเสธ)
 วิธีรัน/ตัวอย่าง API ดู [README.md](../README.md)
 
 ## 1. สรุปสำหรับผู้บริหาร
@@ -17,14 +17,18 @@ User/Role management, HA/Scale, Security hardening) — Asterisk ไม่ได
 |---|---|---|---|---|
 | 1 | SIP / Extension | ผ่าน | PJSIP endpoint/auth/aor ต่อ agent, registration, trunk | S0 |
 | 2 | Inbound call | ผ่าน | trunk → `from-trunk` → IVR | S1 |
-| 3 | IVR / DTMF | ผ่าน | `Background` + `WaitExten`, ตัวเลือก 1/2/0, กดผิดแล้ววนซ้ำ, หมด retry วางสาย | S1, S6 |
-| 4 | Queue routing | ผ่าน | `app_queue` 3 queue, strategy `leastrecent`, wrap-up, MOH | S1, S2 |
+| 3 | IVR / DTMF | ผ่าน | `Background` + `WaitExten`, เมนู 1484 ของ MTI ตัวเลือก 1-6, กดผิดแล้ววนซ้ำ, หมด retry วางสาย | S1, S6 |
+| 4 | Queue routing | ผ่าน | `app_queue` 6 queue (accident, incident, motor, insurance, sales, club), strategy `leastrecent`, wrap-up, MOH | S1, S2 |
 | 5 | Agent handling | ผ่าน | login/logout/pause (feature code + API), answer, hold/unhold, blind transfer ไป agent/queue, hangup ผ่าน API | S1, S3 |
 | 6 | Call recording | ผ่าน | `MixMonitor` option `b`, 1 ไฟล์/สาย ครอบคลุมสายที่ transfer, ดาวน์โหลดผ่าน API ได้เป็น WAV ถูกต้อง | S1, S3, S7 |
 | 7 | CDR / Call history | ผ่าน | `cdr_sqlite3_custom` + custom field (direction, ivr_choice, recording, dialed, agent, dial_status, hangup_cause, ...) และ `queue_log` | S1, S4, S7 |
 | 8 | API / Integration | ผ่าน | FastAPI บน AMI: REST สั่งงาน/ดึงข้อมูล, WebSocket event real-time, webhook screen-pop ไป CRM (mock) | S1, S3, S5 |
 | 9 | Basic monitoring | ผ่าน | `/monitor/summary`, `/agents`, `/queues`, `/calls/active`, event stream | S1 |
-| 10 | **Outbound call** | ผ่าน | agent กด `9`+เบอร์ หรือ API click-to-call → trunk | S7 |
+| 10 | **Outbound call** | ผ่าน | agent กด `9`+เบอร์ หรือ API click-to-call → trunk; ปลายทางเป็นลูกค้าจริงบนเว็บได้ (รับ=CONNECTED, ปฏิเสธ=BUSY, ไม่รับ=NO_ANSWER) | S7 |
+| 11 | Softphone จริงบนเว็บ (WebRTC) | ผ่าน | SIP.js (vendored) ลงทะเบียนผ่าน WebSocket: Agent → pbx:8088, ลูกค้า → sim:8089; เสียง 2 ทาง, DTMF, hold, โอน (REFER) | ทดสอบด้วย headless Chrome |
+| 12 | Transaction / timeline ต่อสาย | ผ่าน | `timeline.db` + `/transactions`: IVR digit, คิว, Agent, **จุดที่โอนไป**, ผลโทรออก | S8 |
+| 13 | เพิ่ม/ลบ Agent runtime | ผ่าน | เขียน `pjsip_agents.conf` + reload PJSIP + QueueAdd/Remove | S9 |
+| 14 | ลูกค้าโทรพร้อมกัน | ผ่าน (3 สาย ใน E2E; dashboard สั่งได้ถึง 30) | pool ลูกค้า WebRTC 20 เบอร์ / ARI | S10 |
 
 ### Outbound: ผลสาย และสถานะ recording
 
@@ -52,6 +56,11 @@ User/Role management, HA/Scale, Security hardening) — Asterisk ไม่ได
 - ทดสอบ hold กับตัวจำลองต้องเปิด `moh_passthrough` ที่ฝั่ง sim (เป็นเรื่องของ test harness ไม่ใช่ PBX)
 - การรัน E2E ครั้งแรกทันทีหลัง restart PBX อาจมี scenario พลาดเพราะ registration/queue ยังไม่นิ่ง (รันซ้ำผ่าน)
 - config ของ Asterisk แยกเป็นไฟล์ text (`pjsip.conf`, `queues.conf`, `extensions.conf`) การเพิ่ม agent/queue จำนวนมากหรือแก้ผ่าน UI ต้องพัฒนา provisioning (เช่น PJSIP/queue realtime บน DB) เพิ่ม
+
+- **WebRTC (SIP.js) กับ Asterisk ใน Docker**: ต้องตั้ง `hostname` ของ container เป็นชื่อสั้น (`pbx`, `sim`) เพราะ SIP.js parse header From/Contact ที่เป็น hostname แบบ hex ของ container ไม่ได้; ICE ใช้ host candidate ผ่าน port ที่ publish (ไม่มี TURN) จึงใช้ได้บนเครื่องเดียว/LAN เท่านั้น — ระบบจริงต้องมี TURN + TLS (`wss`)
+- **Transfer จากเว็บใช้ SIP REFER**: Asterisk ไม่ส่ง BYE ให้ฝั่งผู้โอนเอง softphone ต้อง BYE เองหลัง REFER ถูกรับ (ทำใน [softphone.js](../api/app/static/softphone.js)); ถ้า Agent วางสายก่อนสายถูก bridge (วางทันทีหลังรับ) Queue จะดึงลูกค้ากลับเข้าคิวแล้วเรียก Agent ใหม่ — เป็นพฤติกรรมปกติของ `app_queue`
+- **AMI event class**: event `DTMFEnd` ต้องให้ account AMI มีสิทธิ์ `dtmf` ใน `manager.conf` และ AMI eventfilter กรอง `Newexten` ออก จึงใช้ `UserEvent(IvrPrompt)` จาก dialplan แจ้งว่าเล่นเสียง IVR ไฟล์ไหน
+- Demo state ของลูกค้า/โหมดอยู่ใน memory ของ API; ตัวจำลองลูกค้าที่ ARI ต่อได้ครั้งละ 1 client (E2E ต้องปิดโหมดจำลองก่อน)
 
 ## 4. Gap — สิ่งที่ยังไม่ได้ทดสอบ และสิ่งที่ต้องพัฒนาเพิ่ม
 

@@ -21,7 +21,7 @@ API_KEY = os.getenv("API_KEY", "poc-api-key")
 SIM_ARI = os.getenv("SIM_ARI", "localhost:8089")
 ARI_USER, ARI_PASS = "poc", "poc-ari-secret"
 AGENTS = ["1101", "1102", "1103"]
-QUEUES = ["q-claim", "q-policy", "q-general"]
+QUEUES = ["q-accident", "q-incident", "q-motor", "q-insurance", "q-sales", "q-club"]
 
 api = httpx.AsyncClient(base_url=API_URL, headers={"X-API-Key": API_KEY}, timeout=15)
 ari_http = httpx.AsyncClient(base_url=f"http://{SIM_ARI}/ari", auth=(ARI_USER, ARI_PASS), timeout=15)
@@ -121,7 +121,7 @@ async def place_call(caller: str, digit: str) -> str:
     global _cust_seq
     _cust_seq += 1
     cid = f"cust-{caller}-{_cust_seq}"
-    await ari("POST", "/channels", endpoint="PJSIP/8000@pbx", app="sim", appArgs=f"customer,{digit}",
+    await ari("POST", "/channels", endpoint="PJSIP/1484@pbx", app="sim", appArgs=f"customer,{digit}",
               callerId=caller, channelId=cid, timeout=30)
     return cid
 
@@ -142,7 +142,7 @@ async def wait_agent_answer(since: int, timeout=40):
     return (await wait_until(lambda: new_events("agent_answer", since), timeout, 0.3, "agent answer"))[0]
 
 
-async def wait_gone(ch: str, timeout=15):
+async def wait_gone(ch: str, timeout=45):
     await wait_until(lambda: ch not in ALIVE, timeout, 0.3, f"{ch} to end")
 
 
@@ -171,11 +171,11 @@ async def s0_registration():
     check("sim agents 1101-1103 registered on PBX", all(reg.get(e) for e in AGENTS), str(reg))
     await reset_agents(AGENTS)
     qs = {q["name"]: len(q["members"]) for q in (await api.get("/queues")).json()}
-    check("agents logged in to all queues", all(qs.get(q) == 3 for q in QUEUES), str(qs))
+    check("agents logged in to all 6 queues", all(qs.get(q, 0) >= 3 for q in QUEUES), str(qs))
 
 
 async def s1_full_flow():
-    print("\n[S1] Full flow: IVR(1) -> q-claim -> answer -> hold/unhold -> hangup -> recording + CDR")
+    print("\n[S1] Full flow: IVR(1) -> q-accident -> answer -> hold/unhold -> hangup -> recording + CDR")
     caller, mark = "0811111111", len(LOG)
     cust = await place_call(caller, "1")
     check("inbound call answered by IVR", bool(await wait_until(lambda: new_events("customer_answered", mark), 15, 0.3, "answer")))
@@ -188,7 +188,7 @@ async def s1_full_flow():
     qlist = (await api.get("/queues")).json()
     check("monitor: active call + agent in call", summary["active_calls"] >= 1 and summary["agents"]["in_call"] >= 1,
           json.dumps(summary["agents"]))
-    check("monitor: queue members visible", any(len(q["members"]) == 3 for q in qlist))
+    check("monitor: queue members visible", any(len(q["members"]) >= 3 for q in qlist))
 
     await ari("POST", f"/channels/{agent_ch}/hold")
     await asyncio.sleep(3)
@@ -201,8 +201,8 @@ async def s1_full_flow():
     await hangup(agent_ch)
     await wait_gone(cust)
     call = await find_call(caller)
-    check("CDR: ANSWERED, ivr_choice=claim, queue=q-claim", call["disposition"] == "ANSWERED"
-          and call["ivr_choice"] == "claim" and call["queue"] == "q-claim", json.dumps(call))
+    check("CDR: ANSWERED, ivr_choice=accident, queue=q-accident", call["disposition"] == "ANSWERED"
+          and call["ivr_choice"] == "accident" and call["queue"] == "q-accident", json.dumps(call))
     check("CDR: handled by the agent that answered", call["agent"] == ext, f"cdr agent={call['agent']}")
     recs = (await api.get("/recordings", params={"call_id": call["call_id"]})).json()
     ok = bool(recs)
@@ -214,7 +214,7 @@ async def s1_full_flow():
     check("recording exists, downloadable, valid WAV", ok, f"{recs[0]['path'] if recs else '-'} {size} bytes")
     crm = (await api.get("/mock-crm/screenpop")).json()
     check("CRM webhook (screen pop) received", any(c["call_id"] == call["call_id"] and c["caller_number"] == caller for c in crm))
-    ql = (await api.get("/queue-log", params={"queue": "q-claim"})).json()
+    ql = (await api.get("/queue-log", params={"queue": "q-accident"})).json()
     check("queue_log has CONNECT + COMPLETE*", {"CONNECT"} <= {r["event"] for r in ql}
           and any(r["event"].startswith("COMPLETE") for r in ql))
 
@@ -227,7 +227,7 @@ async def s2_distribution():
         cust = await place_call(caller, "1")
         ans = await wait_agent_answer(mark)
         got.append(ans[1])
-        await asyncio.sleep(2)
+        await asyncio.sleep(3)
         await hangup(ans[2])
         await wait_gone(cust)
     check("calls distributed across agents (leastrecent)", len(set(got)) == 3, str(got))
@@ -237,7 +237,7 @@ async def s2_distribution():
 async def s3_transfer():
     print("\n[S3] Transfer: agent -> other agent (API), then agent -> queue (API)")
     caller, mark = "0833333333", len(LOG)
-    cust = await place_call(caller, "2")
+    cust = await place_call(caller, "2")   # 2 = other incidents (q-incident)
     a = await wait_agent_answer(mark)
     await asyncio.sleep(3)
     target = next(e for e in AGENTS if e != a[1])
@@ -250,9 +250,9 @@ async def s3_transfer():
     check("original agent released after transfer", True)
     await asyncio.sleep(3)
 
-    # second hop: agent -> queue (q-policy)
+    # second hop: agent -> queue (q-motor)
     mark3 = len(LOG)
-    r = await api.post(f"/agents/{target}/transfer", json={"target": "q-general"})
+    r = await api.post(f"/agents/{target}/transfer", json={"target": "q-motor"})
     check("API transfer to queue accepted", r.status_code == 200, r.text[:120])
     c = await wait_agent_answer(mark3)
     check("queue re-routed call to an agent", True, f"agent {c[1]}")
@@ -275,7 +275,7 @@ async def s4_abandon_and_noagent():
     await asyncio.sleep(2)
     await hangup(cust)
     await asyncio.sleep(3)
-    ql = (await api.get("/queue-log", params={"queue": "q-claim", "event": "ABANDON"})).json()
+    ql = (await api.get("/queue-log", params={"queue": "q-accident", "event": "ABANDON"})).json()
     check("queue_log ABANDON recorded", bool(ql))
     PLAN.clear()
     for e in AGENTS:  # clean up ringing sim legs
@@ -285,8 +285,9 @@ async def s4_abandon_and_noagent():
 
     await reset_agents([])
     caller, mark = "0855555555", len(LOG)
-    cust = await place_call(caller, "0")
-    await wait_gone(cust, 40)
+    cust = await place_call(caller, "3")
+    await wait_until(lambda: cust in ALIVE, 15, 0.3, "customer answered")
+    await wait_gone(cust, 100)     # silent customer: no-agent message, fallback menu x2, goodbye
     call = await find_call(caller)
     check("no logged-in agent: call rejected after message, no agent leg", call["agent"] is None, json.dumps(call))
     await reset_agents(AGENTS)
@@ -309,7 +310,7 @@ async def s5_click_to_call():
 async def s6_ivr_invalid():
     print("\n[S6] IVR invalid option then valid option")
     caller, mark = "0866666666", len(LOG)
-    cust = await place_call(caller, "71")   # 7 = invalid -> menu again -> 1
+    cust = await place_call(caller, "71")   # 7 = invalid -> menu again -> 1 (accident)
     ans = await wait_agent_answer(mark, 60)
     check("invalid DTMF handled, retry reached queue", True, f"agent {ans[1]}")
     await asyncio.sleep(2)
@@ -416,6 +417,176 @@ async def s7_outbound():
           {"CONNECTED", "BUSY", "NO_ANSWER", "FAILED", "CANCELLED"} <= summary, str(sorted(summary)))
 
 
+async def s8_transactions():
+    print("\n[S8] Transaction view: IVR digit, queues, agents and transfer hops per call")
+    rows = (await api.get("/transactions", params={"q": "0833333333", "limit": 5})).json()
+    row = rows[0] if rows else {}
+    check("transactions: call with IVR digit 2 found", row.get("ivr_digits") == ["2"], json.dumps(row)[:200])
+    check("transactions: transfer recorded (agent -> q-motor)",
+          any(t.get("to") == "q-motor" for t in row.get("transfers", [])), json.dumps(row.get("transfers")))
+    detail = (await api.get(f"/transactions/{row['call_id']}")).json() if row else {"steps": []}
+    kinds = [s["kind"] for s in detail["steps"]]
+    check("transaction steps cover IVR -> queue -> agent -> transfer -> end",
+          all(k in kinds for k in ("call_start", "ivr_prompt", "ivr_digit", "queue_join", "agent_answer", "transfer", "call_end")),
+          ",".join(dict.fromkeys(kinds)))
+    check("transaction steps name from/to modules", all(s.get("from") and s.get("to") for s in detail["steps"]))
+    check("transaction detail joins the CDR row (recording)", bool((detail.get("cdr") or {}).get("recording")))
+
+
+async def s9_agents_admin():
+    print("\n[S9] Add / remove agents at runtime")
+    r = await api.post("/demo/agents", json={"name": "E2E Agent", "login": True})
+    check("agent added", r.status_code == 200, r.text[:120])
+    ext = r.json()["extension"]
+    qs = {q["name"]: [m["interface"] for m in q["members"]] for q in (await api.get("/queues")).json()}
+    check("new agent is a member of all 6 queues", all(f"PJSIP/{ext}" in qs.get(q, []) for q in QUEUES), ext)
+    reg = (await api.get("/demo/agents/registry")).json()
+    check("agent present in registry", any(a["extension"] == ext for a in reg), str(reg)[:120])
+    r = await api.delete(f"/demo/agents/{ext}")
+    check("agent removed", r.status_code == 200, r.text[:120])
+    qs = (await api.get("/queues")).json()
+    check("removed agent no longer in any queue", not any(ext in json.dumps(q["members"]) for q in qs))
+    reg = (await api.get("/demo/agents/registry")).json()
+    check("agent gone from registry", not any(a["extension"] == ext for a in reg))
+
+
+async def s10_concurrent():
+    print("\n[S10] Concurrent customers: 3 simultaneous calls -> 3 different agents")
+    await reset_agents(AGENTS)
+    await asyncio.sleep(1)
+    mark = len(LOG)
+    custs = await asyncio.gather(*[place_call(f"087700000{i}", d) for i, d in enumerate("135", 1)])
+    await wait_until(lambda: len(new_events("agent_answer", mark)) >= 3, 60, 0.3, "3 agent answers")
+    got = new_events("agent_answer", mark)
+    check("3 concurrent calls answered by 3 different agents", len({g[1] for g in got}) == 3, str([g[1] for g in got]))
+    active = (await api.get("/calls/active")).json()
+    check("monitor shows 3 simultaneous calls", len(active) >= 3, f"{len(active)} active")
+    await asyncio.sleep(3)   # an agent hang-up before the bridge is established would put the caller back in the queue
+    for g in got:
+        await hangup(g[2])
+    for c in custs:
+        await wait_gone(c)
+    await asyncio.sleep(6)
+
+
+async def read_waiting(caller: str, timeout=60) -> bool:
+    """The fallback menu / number / slot prompt is playing (dialplan Read())."""
+    async def f():
+        for c in (await api.get("/calls/active")).json():
+            if c["caller"] == caller and (c["application"] or "").lower() == "read":
+                return True
+        return False
+    return await wait_until(f, timeout, 0.3, f"fallback prompt for {caller}")
+
+
+async def dtmf(ch: str, digits: str):
+    await ari("POST", f"/channels/{ch}/dtmf", dtmf=digits)
+    await asyncio.sleep(1.5)       # let the dialplan move on to the next Read()
+
+
+async def tx_summary(caller: str, timeout=25):
+    async def f():
+        rows = (await api.get("/transactions", params={"q": caller, "limit": 5})).json()
+        return rows[0] if rows and rows[0]["result"] not in ("IN_PROGRESS", "TALKING") else None
+    return await wait_until(f, timeout, 1, f"transaction of {caller}")
+
+
+async def s11_fallback():
+    print("\n[S11] After hours / no agent: voicemail or callback (own number / other number + time slot)")
+    r = await api.post("/hours", json={"mode": "closed"})
+    check("hours override set to closed", r.status_code == 200 and not r.json()["open_now"], r.text[:150])
+    await reset_agents(AGENTS)
+
+    # accident hotline is 24 h: still rings an agent although the center is closed
+    mark = len(LOG)
+    cust = await place_call("0890000009", "1")
+    ans = await wait_agent_answer(mark, 60)
+    check("closed hours: q-accident (24 h hotline) still reaches an agent", True, f"agent {ans[1]}")
+    await asyncio.sleep(3)
+    await hangup(ans[2])
+    await wait_gone(cust)
+    await asyncio.sleep(2)
+
+    # 1: voicemail
+    caller = "0890000001"
+    cust = await place_call(caller, "3")
+    await read_waiting(caller)
+    await dtmf(cust, "1")
+    await asyncio.sleep(9)         # intro prompt + beep; then the sim customer speaks (recorded as the message)
+    await talk(cust)
+    await asyncio.sleep(8)
+    await hangup(cust)
+    await wait_gone(cust)
+    async def vm_msg():
+        return [m for m in (await api.get("/voicemail", params={"mailbox": "motor"})).json() if m["caller"] == caller]
+    msgs = await wait_until(vm_msg, 20, 1, "voicemail message")
+    check("voicemail stored in mailbox motor with caller number", bool(msgs), json.dumps(msgs[:1]))
+    m = msgs[0]
+    data = (await api.get(f"/voicemail/{m['mailbox']}/{m['folder']}/{m['message']}")).content
+    check("voicemail downloadable, valid WAV", data[:4] == b"RIFF" and len(data) > 8000, f"{len(data)} bytes")
+    row = await tx_summary(caller)
+    check("transaction result=VOICEMAIL, reason=after_hours",
+          row["result"] == "VOICEMAIL" and row["fallback_reason"] == "after_hours", json.dumps(row)[:200])
+    detail = (await api.get(f"/transactions/{row['call_id']}")).json()
+    kinds = [s["kind"] for s in detail["steps"]]
+    check("transaction shows the transfer to voicemail", "fallback_offer" in kinds and "fallback_voicemail" in kinds,
+          ",".join(dict.fromkeys(kinds)))
+    check("transaction links the voicemail message", bool(detail.get("voicemail")))
+    check("menu key presses of the fallback are not shown as IVR choices", row["ivr_digits"] == ["3"], str(row["ivr_digits"]))
+
+    # 2: callback on the number the customer called from
+    caller = "0890000002"
+    cust = await place_call(caller, "5")
+    await read_waiting(caller)
+    await dtmf(cust, "2")
+    await read_waiting(caller)      # time slot prompt
+    await dtmf(cust, "2")
+    await wait_gone(cust, 30)
+
+    async def cb_row(number):
+        return next((c for c in (await api.get("/callbacks")).json() if c["callback_number"] == number), None)
+    cb = await wait_until(lambda: cb_row(caller), 25, 1, "callback request")
+    check("callback: own number + slot 2 (afternoon), topic sales, reason after_hours",
+          cb["slot"] == "2" and cb["queue"] == "q-sales" and cb["reason"] == "after_hours" and cb["status"] == "pending",
+          json.dumps(cb))
+    row = await tx_summary(caller)
+    check("transaction result=CALLBACK with number and slot",
+          row["result"] == "CALLBACK" and row["callback"]["number"] == caller and row["callback"]["slot"] == "2", json.dumps(row)[:200])
+    r = await api.post(f"/callbacks/{cb['call_id']}/status", json={"status": "done", "note": "called back"})
+    done = [c for c in (await api.get("/callbacks", params={"status": "done"})).json() if c["call_id"] == cb["call_id"]]
+    check("callback marked as done", r.status_code == 200 and bool(done))
+
+    # 3: callback on another number
+    caller, other = "0890000003", "0812345678"
+    cust = await place_call(caller, "4")
+    await read_waiting(caller)
+    await dtmf(cust, "3")
+    await read_waiting(caller)      # number prompt
+    await dtmf(cust, other + "#")
+    await read_waiting(caller)      # time slot prompt
+    await dtmf(cust, "1")
+    await wait_gone(cust, 30)
+    cb = await wait_until(lambda: cb_row(other), 25, 1, "callback request (other number)")
+    check("callback: other number + slot 1 (morning), topic insurance",
+          cb["caller"] == caller and cb["slot"] == "1" and cb["queue"] == "q-insurance", json.dumps(cb))
+
+    # no agent while the center is open -> same offer with reason no_agent
+    await api.post("/hours", json={"mode": "open"})
+    await reset_agents([])
+    caller = "0890000004"
+    cust = await place_call(caller, "3")
+    await read_waiting(caller, 90)
+    await asyncio.sleep(1)
+    await hangup(cust)
+    await wait_gone(cust)
+    row = await tx_summary(caller)
+    detail = (await api.get(f"/transactions/{row['call_id']}")).json()
+    offer = next((s for s in detail["steps"] if s["kind"] == "fallback_offer"), None)
+    check("open hours, nobody logged in: fallback offered with reason no_agent",
+          bool(offer) and offer["detail"]["reason"] == "no_agent", json.dumps(offer)[:200] if offer else "no offer")
+    await reset_agents(AGENTS)
+
+
 async def main() -> int:
     # wait for API + AMI
     async def ready():
@@ -425,6 +596,7 @@ async def main() -> int:
             return False
     await wait_until(ready, 90, 2, "API/AMI ready")
     await api.post("/demo/disable")      # only one ARI client may serve Stasis app "sim"
+    await api.post("/hours", json={"mode": "open"})   # scenarios S0-S10 assume the call center is open
 
     async with websockets.connect(
         f"ws://{SIM_ARI}/ari/events?app=sim&api_key={ARI_USER}:{ARI_PASS}") as ws:
@@ -436,7 +608,8 @@ async def main() -> int:
             await wait_until(regd, 60, 2, "sim agent registration")
             only = {x.strip() for x in os.getenv("ONLY", "").split(",") if x.strip()}   # e.g. ONLY=s0,s1
             for sc in (s0_registration, s1_full_flow, s2_distribution, s3_transfer,
-                       s4_abandon_and_noagent, s5_click_to_call, s6_ivr_invalid, s7_outbound):
+                       s4_abandon_and_noagent, s5_click_to_call, s6_ivr_invalid, s7_outbound,
+                       s8_transactions, s9_agents_admin, s10_concurrent, s11_fallback):
                 if only and sc.__name__.split("_")[0] not in only and sc is not s0_registration:
                     continue
                 try:
@@ -444,6 +617,7 @@ async def main() -> int:
                 except Exception as exc:  # keep going, report
                     check(f"{sc.__name__} aborted", False, repr(exc))
         finally:
+            await api.post("/hours", json={"mode": "auto"})
             loop_task.cancel()
 
     failed = [r for r in RESULTS if not r[1]]

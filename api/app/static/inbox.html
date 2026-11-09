@@ -1,0 +1,67 @@
+<!doctype html>
+<html lang="th"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Voicemail / โทรกลับ</title><link rel="stylesheet" href="/static/common.css">
+<style>.cols { display:grid; grid-template-columns:1fr 1fr; gap:14px; } @media (max-width:1100px) { .cols { grid-template-columns:1fr; } }</style></head>
+<body>
+<header class="top"><h1>Voicemail / ขอให้โทรกลับ</h1><span class="mut">ลูกค้าที่โทรนอกเวลาหรือไม่มี Agent ว่าง และเลือกฝากข้อความหรือขอให้โทรกลับ</span><span id="nav"></span></header>
+<main>
+  <div class="panel" style="margin-bottom:14px">
+    <h2>เวลาทำการ</h2>
+    <div class="row"><span id="hours" class="mut"></span>
+      <select id="mode"><option value="auto">ตามตารางเวลา (auto)</option><option value="open">บังคับเปิด</option><option value="closed">บังคับปิด (ทดสอบนอกเวลา)</option></select>
+      <button id="setmode">ตั้งค่า</button></div>
+  </div>
+  <div class="cols">
+    <div class="panel"><h2>ขอให้โทรกลับ <select id="cbf" style="margin-left:8px"><option value="">ทั้งหมด</option><option value="pending">รอดำเนินการ</option><option value="done">โทรกลับแล้ว</option></select></h2><table id="cb"></table></div>
+    <div class="panel"><h2>Voicemail</h2><table id="vm"></table></div>
+  </div>
+</main>
+<script src="/static/common.js"></script>
+<script>
+$('#nav').outerHTML = nav('/demo/inbox');
+const dt = e => fmtDateTime(typeof e === 'number' ? e * 1000 : e);
+let LAST = '';
+
+async function loadHours() {
+  try {
+    const h = await api('/hours', 'GET', null, true);
+    $('#hours').innerHTML = `${esc(h.schedule)} · ขณะนี้ <span class="chip ${h.open_now ? 'ok' : 'warn'}">${h.open_now ? 'เปิด' : 'ปิด'}</span>`;
+    if (document.activeElement !== $('#mode')) $('#mode').value = h.mode;
+  } catch (e) { /* PBX offline */ }
+}
+
+async function load() {
+  let cb = [], vm = [];
+  try {
+    const p = $('#cbf').value ? '?status=' + $('#cbf').value : '';
+    [cb, vm] = await Promise.all([api('/callbacks' + p, 'GET', null, true), api('/voicemail', 'GET', null, true)]);
+  } catch (e) { return; }
+  const html = {
+    cb: '<tr><th>ขอเมื่อ</th><th>เบอร์โทรกลับ</th><th>ช่วงเวลา</th><th>เรื่อง</th><th>สาเหตุ</th><th></th></tr>' + cb.map(c => `
+      <tr><td>${dt(c.requested_at.replace(' ', 'T') + 'Z')}</td><td class="mono">${esc(c.callback_number)}</td><td>${esc(c.slot_label || '')}</td>
+      <td>${esc(c.queue_th || '')}</td><td>${esc(c.reason_th || '')}</td>
+      <td>${c.status === 'done' ? '<span class="chip ok">โทรกลับแล้ว</span>' : `<button class="sm ok" data-done="${esc(c.call_id)}">โทรกลับแล้ว</button> <button class="sm" data-call="${esc(c.callback_number)}">โทร</button>`}</td></tr>`).join('')
+      || '<tr><td class="mut">ยังไม่มีรายการ</td></tr>',
+    vm: '<tr><th>เวลา</th><th>เบอร์ลูกค้า</th><th>เรื่อง</th><th>นาน</th><th>ฟัง</th></tr>' + vm.map(m => `
+      <tr><td>${dt(m.time)}</td><td class="mono">${esc(m.caller || '')}</td><td>${esc(m.queue_th)}</td><td>${mmss(m.duration)}</td>
+      <td><audio controls preload="none" style="height:30px;width:220px" src="/voicemail/${encodeURI(m.mailbox)}/${m.folder}/${m.message}?api_key=${CFG.api_key}"></audio></td></tr>`).join('')
+      || '<tr><td class="mut">ยังไม่มี voicemail</td></tr>',
+  };
+  const key = JSON.stringify([cb, vm]);
+  if (key === LAST) return;                 // do not interrupt audio playback when nothing changed
+  LAST = key;
+  $('#cb').innerHTML = html.cb; $('#vm').innerHTML = html.vm;
+}
+
+document.addEventListener('click', async ev => {
+  const b = ev.target.closest('button'); if (!b) return;
+  if (b.dataset.done) { await api(`/callbacks/${b.dataset.done}/status`, 'POST', { status: 'done' }); LAST = ''; load(); }
+  if (b.dataset.call) {
+    const agent = prompt('Agent extension ที่จะเป็นผู้โทร', (CFG.sim_agents || [])[0] || '1101');
+    if (agent) { try { await api('/calls/originate', 'POST', { agent, destination: b.dataset.call }); toast('เรียก Agent ' + agent + ' แล้ว', 'ok'); } catch (e) { /* toast shown */ } }
+  }
+});
+$('#setmode').onclick = async () => { await api('/hours', 'POST', { mode: $('#mode').value }); toast('ตั้งเวลาทำการแล้ว', 'ok'); loadHours(); };
+$('#cbf').onchange = () => { LAST = ''; load(); };
+loadHours(); load(); setInterval(load, 4000); setInterval(loadHours, 15000);
+</script></body></html>

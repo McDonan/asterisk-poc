@@ -1,0 +1,120 @@
+<!doctype html>
+<html lang="th"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Flow Map - แต่ละขั้นตอนคือ module ไหนคุยกับ module ไหน</title><link rel="stylesheet" href="/static/common.css">
+<style>
+  svg { width:100%; height:auto; background:#0b1220; border:1px solid var(--line); border-radius:10px; }
+  .node rect { fill:#1e293b; stroke:#475569; stroke-width:1.5; rx:12; } .node text { fill:#e2e8f0; text-anchor:middle; }
+  .node .t { font-size:14px; font-weight:600; } .node .s { font-size:10.5px; fill:#94a3b8; } .node.hot rect { stroke:#fbbf24; stroke-width:3; fill:#33290f; }
+  .node .badge { fill:#6366f1; } .node .bt { font-size:11px; font-weight:700; fill:#fff; }
+  .edge path { fill:none; stroke-width:2; opacity:.55; } .edge.in path { stroke:#38bdf8; } .edge.out path { stroke:#22c55e; } .edge.sup path { stroke:#a78bfa; stroke-dasharray:6 4; }
+  .edge .n { fill:#0f172a; stroke-width:1.5; } .edge.in .n { stroke:#38bdf8; } .edge.out .n { stroke:#22c55e; } .edge.sup .n { stroke:#a78bfa; }
+  .edge text { fill:#e2e8f0; font-size:11px; font-weight:700; text-anchor:middle; dominant-baseline:central; }
+  .edge.hot path { opacity:1; stroke-width:4; filter:drop-shadow(0 0 4px #fbbf24); } .edge.hot .n { fill:#fbbf24; } .edge.hot text { fill:#000; }
+  .legend span { margin-right:16px; } .legend i { display:inline-block; width:22px; height:3px; vertical-align:middle; margin-right:6px; }
+  .cols { display:grid; grid-template-columns:2fr 1fr; gap:14px; margin-top:14px; } @media (max-width:1000px) { .cols { grid-template-columns:1fr; } }
+  tr.hot td { background:#33290f; } td.k { white-space:nowrap; font-weight:700; }
+</style></head>
+<body>
+<header class="top"><h1>Flow Map</h1><span class="mut">แต่ละขั้นตอนของสายคือ module ไหนคุยกับ module ไหน (เส้นไฟกระพริบ = เหตุการณ์จริงที่เกิดขึ้นตอนนี้)</span><span id="nav"></span></header>
+<main>
+  <div class="legend mut" style="margin-bottom:10px"><span><i style="background:#38bdf8"></i>สายเข้า (Inbound)</span><span><i style="background:#22c55e"></i>สายออก (Outbound)</span><span><i style="background:#a78bfa"></i>Integration / ข้อมูล</span></div>
+  <svg id="svg" viewBox="0 0 1200 470"></svg>
+  <div class="cols">
+    <div class="panel"><h2>ขั้นตอน</h2><table id="steps"></table></div>
+    <div class="panel"><h2>เหตุการณ์ล่าสุด</h2><div id="log" style="max-height:420px;overflow:auto;font-size:12.5px"></div></div>
+  </div>
+</main>
+<script src="/static/common.js"></script>
+<script>
+$('#nav').outerHTML = nav('/demo/flow');
+const NODES = {
+  customer: { x: 100, y: 90, t: 'ลูกค้า', s: 'softphone (SIP.js) / โทรศัพท์' },
+  carrier: { x: 330, y: 90, t: 'Carrier / SIP trunk', s: 'sim Asterisk (จำลอง PSTN)' },
+  pjsip: { x: 570, y: 90, t: 'PBX: PJSIP', s: 'Asterisk 22 · SIP / WebRTC' },
+  ivr: { x: 810, y: 90, t: 'Dialplan: IVR', s: 'ivr-main · เมนู 1-6' },
+  queue: { x: 1050, y: 90, t: 'app_queue', s: 'queue-flow · q-accident … q-club' },
+  agent: { x: 1050, y: 300, t: 'Agent', s: 'หน้า Agent (SIP.js) / softphone' },
+  recorder: { x: 810, y: 300, t: 'MixMonitor', s: 'บันทึกเสียง .wav' },
+  cdr: { x: 570, y: 300, t: 'CDR + queue_log', s: 'SQLite / ไฟล์' },
+  api: { x: 330, y: 300, t: 'Integration API', s: 'FastAPI · AMI · REST · WS' },
+  crm: { x: 100, y: 300, t: 'CRM / Agent app', s: 'Dashboard · Transactions' },
+};
+// n = step number, k = inbound | outbound | support
+const EDGES = [
+  { id: 'i1', n: 1, f: 'customer', t: 'carrier', k: 'in', d: 'ลูกค้าโทร 1484', p: 'SIP INVITE (WebSocket :8089 / UDP) · RTP/SRTP' },
+  { id: 'i2', n: 2, f: 'carrier', t: 'pjsip', k: 'in', d: 'Carrier ส่งสายเข้า PBX', p: 'SIP trunk (UDP 5060) → context from-trunk, exten 1484' },
+  { id: 'i3', n: 3, f: 'pjsip', t: 'ivr', k: 'in', d: 'IVR: ต้อนรับ + เมนู (ไฟล์เสียงภาษาไทย)', p: 'Dialplan Answer / Playback / BackGround, UserEvent IvrPrompt', curve: 0 },
+  { id: 'i4', n: 4, f: 'ivr', t: 'queue', k: 'in', d: 'ลูกค้ากด 1-6 → เข้าคิวตามบริการ', p: 'DTMF (RFC 4733) → Goto queue-flow · CDR ivr_choice' },
+  { id: 'i5', n: 5, f: 'queue', t: 'agent', k: 'in', d: 'คิวเรียก Agent ที่ว่าง (leastrecent)', p: 'Queue() → Dial PJSIP/<ext> (WS :8088 หรือ UDP)', curve: -40 },
+  { id: 'i6', n: 6, f: 'agent', t: 'recorder', k: 'in', d: 'Agent รับสาย → เริ่มบันทึกเสียง', p: 'Bridge ลูกค้า↔Agent · MixMonitor(b)' },
+  { id: 'i7', n: 7, f: 'recorder', t: 'cdr', k: 'in', d: 'จบสาย → ไฟล์เสียง + CDR + queue_log', p: 'cdr_sqlite3_custom · queue_log' },
+  { id: 'i8', n: 11, f: 'agent', t: 'queue', k: 'in', d: 'Agent โอนสายไปคิว/Agent อื่น', p: 'SIP REFER / AMI BlindTransfer → queue-flow', curve: 40 },
+  { id: 's1', n: 8, f: 'pjsip', t: 'api', k: 'sup', d: 'AMI events (Newchannel, QueueCallerJoin, AgentConnect …)', p: 'AMI TCP :5038 (panoramisk)' },
+  { id: 's2', n: 9, f: 'api', t: 'crm', k: 'sup', d: 'ข้อมูล real-time + screen pop', p: 'REST, WebSocket /ws/events, webhook' },
+  { id: 's3', n: 10, f: 'cdr', t: 'api', k: 'sup', d: 'อ่านประวัติสาย / ไฟล์เสียง', p: 'sqlite (ro) + ไฟล์ /recordings' },
+  { id: 'o1', n: 'O1', f: 'crm', t: 'api', k: 'out', d: 'Agent กด "โทรออก"', p: 'POST /demo/outbound → /calls/originate', curve: 30 },
+  { id: 'o2', n: 'O2', f: 'api', t: 'pjsip', k: 'out', d: 'API สั่งให้ PBX โทรหา Agent ก่อน', p: 'AMI Originate PJSIP/<agent> · from-internal', curve: 0 },
+  { id: 'o3', n: 'O3', f: 'pjsip', t: 'carrier', k: 'out', d: 'Agent รับ → โทรออกผ่าน trunk', p: 'Gosub sub-outbound → Dial PJSIP/<num>@trunk-sim · caller-id 1484', curve: -45 },
+  { id: 'o4', n: 'O4', f: 'carrier', t: 'customer', k: 'out', d: 'ลูกค้ามีสายเรียกเข้า → รับ / ปฏิเสธ / ไม่รับ', p: 'SIP INVITE → web phone หรือ Stasis(sim) · ผล: CONNECTED/BUSY/NO_ANSWER/FAILED', curve: -40 },
+];
+// AMI event -> edges that flash
+const HOT = {
+  Newchannel: e => (/^PJSIP\/trunk-sim/.test(e.Channel || '') ? ['i1', 'i2', 's1'] : /^PJSIP\/\d{4}-/.test(e.Channel || '') ? ['o1', 'o2'] : []),
+  IvrPrompt: () => ['i3', 's1'], DTMFEnd: e => (/trunk-sim/.test(e.Channel || '') ? ['i4'] : []),
+  QueueCallerJoin: () => ['i4', 's1'], AgentCalled: () => ['i5', 's1'], AgentConnect: () => ['i6', 's2', 's1'], AgentComplete: () => ['i7', 's1'],
+  BlindTransfer: () => ['i8', 's1'], QueueCallerAbandon: () => ['i7', 's1'],
+  DialBegin: e => ((e.DestChannel || '').startsWith('PJSIP/trunk-') ? ['o3', 'o4'] : []), OutboundDialResult: () => ['o4', 's2'], Cdr: () => ['s3'],
+};
+const NODE_OF = { i1: ['customer', 'carrier'], i2: ['carrier', 'pjsip'], i3: ['ivr'], i4: ['queue'], i5: ['agent'], i6: ['recorder'], i7: ['cdr'], i8: ['queue'], s1: ['api'], s2: ['crm'], s3: ['api'], o1: ['api'], o2: ['pjsip'], o3: ['carrier'], o4: ['customer'] };
+const W = 190, H = 70;
+const NS = 'http://www.w3.org/2000/svg';
+
+function anchor(a, b) {            // point on the border of node a towards node b
+  const dx = b.x - a.x, dy = b.y - a.y, sx = (W / 2) / Math.abs(dx || 1e-9), sy = (H / 2) / Math.abs(dy || 1e-9), s = Math.min(sx, sy);
+  return [a.x + dx * s, a.y + dy * s];
+}
+function build() {
+  let h = `<defs>${['in:#38bdf8', 'out:#22c55e', 'sup:#a78bfa'].map(x => { const [k, c] = x.split(':'); return `<marker id="ar-${k}" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="${c}"/></marker>`; }).join('')}</defs>`;
+  for (const e of EDGES) {
+    const a = NODES[e.f], b = NODES[e.t], [x1, y1] = anchor(a, b), [x2, y2] = anchor(b, a);
+    const mx = (x1 + x2) / 2, my = (y1 + y2) / 2, len = Math.hypot(x2 - x1, y2 - y1) || 1, c = e.curve || 0;
+    const cx = mx + (-(y2 - y1) / len) * c, cy = my + ((x2 - x1) / len) * c;
+    const px = 0.25 * x1 + 0.5 * cx + 0.25 * x2, py = 0.25 * y1 + 0.5 * cy + 0.25 * y2;
+    h += `<g class="edge ${e.k}" id="e-${e.id}"><path d="M${x1},${y1} Q${cx},${cy} ${x2},${y2}" marker-end="url(#ar-${e.k})"/>
+      <circle class="n" cx="${px}" cy="${py}" r="12"/><text x="${px}" y="${py}">${e.n}</text></g>`;
+  }
+  for (const [k, n] of Object.entries(NODES)) {
+    h += `<g class="node" id="n-${k}"><rect x="${n.x - W / 2}" y="${n.y - H / 2}" width="${W}" height="${H}"/>
+      <text class="t" x="${n.x}" y="${n.y - 4}">${n.t}</text><text class="s" x="${n.x}" y="${n.y + 16}">${n.s}</text>
+      <circle class="badge" id="b-${k}" cx="${n.x + W / 2 - 4}" cy="${n.y - H / 2 + 4}" r="11" style="display:none"/><text class="bt" id="bt-${k}" x="${n.x + W / 2 - 4}" y="${n.y - H / 2 + 8}"></text></g>`;
+  }
+  $('#svg').innerHTML = h;
+  const grp = { in: 'สายเข้า', sup: 'Integration', out: 'สายออก' };
+  $('#steps').innerHTML = '<tr><th>#</th><th>จาก → ไป</th><th>ทำอะไร</th><th>โปรโตคอล / กลไก</th></tr>' + EDGES.map(e => `<tr id="r-${e.id}">
+    <td class="k">${e.n}</td><td>${NODES[e.f].t} → ${NODES[e.t].t}<br><span class="chip">${grp[e.k]}</span></td><td>${e.d}</td><td class="mut">${e.p}</td></tr>`).join('');
+}
+function flash(ids) {
+  for (const id of new Set(ids)) {
+    for (const el of [$('#e-' + id), $('#r-' + id), ...(NODE_OF[id] || []).map(n => $('#n-' + n))]) {
+      if (!el) continue; el.classList.add('hot'); clearTimeout(el._t); el._t = setTimeout(() => el.classList.remove('hot'), 1400);
+    }
+  }
+}
+function log(e, ids) {
+  const d = document.createElement('div');
+  d.innerHTML = `<span class="mut">${fmtTime(e.ts)}</span> <b>${esc(e.event)}</b> ${esc(e.Prompt || e.Queue || e.Digit || e.Interface || e.result || e.Extension || '')} → ขั้น ${ids.filter(i => !i.startsWith('s')).map(i => EDGES.find(x => x.id === i).n).join(', ') || '8'}`;
+  $('#log').prepend(d); while ($('#log').children.length > 60) $('#log').lastChild.remove();
+}
+build();
+loadConfig().then(() => watchEvents(e => {
+  const f = HOT[e.event]; if (!f) return;
+  const ids = f(e); if (!ids.length) return; flash(ids); log(e, ids);
+}));
+setInterval(async () => {          // number of calls currently in each stage
+  try {
+    const s = await api('/demo/state', 'GET', null, true), c = { ivr: 0, queue: 0, agent: 0 };
+    for (const k of s.calls) { if (k.stage === 'ivr') c.ivr++; else if (k.stage === 'queue') c.queue++; else c.agent++; }
+    for (const [k, v] of Object.entries(c)) { $('#b-' + k).style.display = v ? '' : 'none'; $('#bt-' + k).textContent = v || ''; }
+  } catch (e) { /* ignore */ }
+}, 1500);
+</script></body></html>

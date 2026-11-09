@@ -97,8 +97,14 @@ def call_history(limit=50, caller=None, date_from=None, date_to=None,
             "direction": None, "ivr_choice": None, "queue": None, "agent": None, "agents": [],
             "dialed": None, "dial_status": None, "hangup_cause": None,
             "total_seconds": 0, "ring_seconds": 0, "talk_seconds": 0, "disposition": None,
-            "recording": None, "legs": 0,
+            "recording": None, "legs": 0, "rating": None,
+            "fallback": None, "fallback_reason": None, "fallback_queue": None,
+            "callback_number": None, "callback_slot": None,
         })
+        for k in ("fallback", "fallback_reason", "fallback_queue", "callback_number", "callback_slot"):
+            c[k] = c[k] or r.get(k) or None
+        if r.get("rating") not in (None, ""):
+            c["rating"] = _num(r["rating"])
         c["legs"] += 1
         c["direction"] = c["direction"] or r.get("direction") or None
         c["ivr_choice"] = c["ivr_choice"] or r.get("ivr_choice") or None
@@ -141,7 +147,7 @@ def call_history(limit=50, caller=None, date_from=None, date_to=None,
             c["result"] = _outbound_result(c["dial_status"], c["disposition"])
             c["hangup_cause_text"] = HANGUP_CAUSE_TEXT.get(str(c["hangup_cause"] or ""))
         else:
-            c["result"] = None
+            c["result"] = {"voicemail": "VOICEMAIL", "callback": "CALLBACK"}.get(c["fallback"])
             c["hangup_cause_text"] = None
         c["recording_status"] = _recording_status(c["recording"])
         if direction and c["direction"] != direction:
@@ -156,6 +162,66 @@ def call_history(limit=50, caller=None, date_from=None, date_to=None,
             continue
         out.append(c)
     return out[:limit]
+
+
+# ---------------- Voicemail ----------------
+_MBOX_RE = re.compile(r"^[a-z0-9_-]{1,32}$")
+_MSG_RE = re.compile(r"^msg\d{4}$")
+VM_FOLDERS = ("INBOX", "Old")
+
+
+def _vm_meta(txt: Path) -> dict:
+    meta = {}
+    try:
+        for line in txt.read_text(errors="replace").splitlines():
+            if "=" in line and not line.startswith((";", "[")):
+                k, v = line.split("=", 1)
+                meta[k.strip()] = v.strip()
+    except OSError:
+        pass
+    return meta
+
+
+def list_voicemail(mailbox: str | None = None) -> list[dict]:
+    """Voicemail messages left by customers (wav + msgNNNN.txt written by Asterisk), newest first."""
+    base = Path(config.VM_DIR) / "default"
+    if not base.is_dir():
+        return []
+    items = []
+    for box in sorted(p for p in base.iterdir() if p.is_dir()):
+        if mailbox and box.name != mailbox:
+            continue
+        for folder in VM_FOLDERS:
+            for wav in (box / folder).glob("msg*.wav"):
+                if not _MSG_RE.match(wav.stem):
+                    continue
+                meta = _vm_meta(wav.with_suffix(".txt"))
+                cid = meta.get("callerid", "")
+                m = re.search(r"<([^>]*)>", cid)
+                items.append({
+                    "mailbox": box.name, "folder": folder, "message": wav.stem,
+                    "caller": (m.group(1) if m else cid.strip('"')) or None,
+                    "time": _num(meta.get("origtime")) or int(wav.stat().st_mtime),
+                    "duration": _num(meta.get("duration")), "size_bytes": wav.stat().st_size,
+                })
+    return sorted(items, key=lambda x: x["time"], reverse=True)
+
+
+def resolve_voicemail(mailbox: str, folder: str, message: str) -> Path:
+    if not _MBOX_RE.match(mailbox) or folder not in VM_FOLDERS or not _MSG_RE.match(message):
+        raise FileNotFoundError(message)
+    p = Path(config.VM_DIR) / "default" / mailbox / folder / f"{message}.wav"
+    if not p.is_file():
+        raise FileNotFoundError(message)
+    return p
+
+
+def voicemail_for_call(caller: str | None, start_ts: float, end_ts: float) -> dict | None:
+    """The voicemail message recorded during a call (same caller number, recording started inside the call)."""
+    for m in list_voicemail():
+        if m["caller"] == caller and start_ts - 2 <= m["time"] <= end_ts + 30:
+            return m
+    return None
 
 
 # ---------------- Recordings ----------------

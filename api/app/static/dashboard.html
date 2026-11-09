@@ -1,0 +1,94 @@
+<!doctype html>
+<html lang="th"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Dashboard - MTI 1484 Call Center POC</title><link rel="stylesheet" href="/static/common.css">
+<style>
+  .kpis { display:grid; grid-template-columns:repeat(auto-fit,minmax(140px,1fr)); gap:12px; }
+  .kpi { background:var(--panel); border:1px solid var(--line); border-radius:10px; padding:12px; } .kpi b { display:block; font-size:28px; }
+  .cols { display:grid; grid-template-columns:3fr 2fr; gap:14px; margin-top:14px; } @media (max-width:1000px) { .cols { grid-template-columns:1fr; } }
+  .agents { display:grid; grid-template-columns:repeat(auto-fill,minmax(210px,1fr)); gap:10px; }
+  .ag { background:var(--panel2); border:1px solid var(--line); border-left:5px solid var(--mut); border-radius:8px; padding:9px 11px; }
+  .ag.idle { border-left-color:var(--ok); } .ag.busy { border-left-color:var(--err); } .ag.ringing { border-left-color:var(--warn); }
+  .ag.paused { border-left-color:var(--info); } .ag .t { font-weight:600; } .ev { max-height:340px; overflow:auto; font-size:12.5px; }
+  .ev div { padding:3px 0; border-bottom:1px solid var(--line); } .ev .ok { color:#86efac; } .ev .warn { color:#fcd34d; } .ev .ivr { color:#c4b5fd; } .ev .queue { color:#7dd3fc; }
+</style></head>
+<body>
+<header class="top"><h1>Dashboard</h1><span id="dstate" class="chip"></span><span id="nav"></span></header>
+<main>
+  <div class="kpis" id="kpis"></div>
+  <div class="cols">
+    <div class="grid">
+      <div class="panel"><h2>Agents</h2><div class="agents" id="agents"></div>
+        <div class="row" style="margin-top:12px"><input id="newname" placeholder="ชื่อ Agent ใหม่ (ไม่ใส่ก็ได้)"><button id="add" class="primary">+ เพิ่ม Agent</button>
+          <span class="mut">สร้าง endpoint WebRTC ใหม่ (ext 12xx) และเข้าคิวทั้ง 6 — เปิดที่หน้า Agent เพื่อใช้งาน</span></div></div>
+      <div class="panel"><h2>คิว (เมนู IVR 1484)</h2><table id="queues"></table></div>
+      <div class="panel"><h2>สายที่กำลังดำเนินการ</h2><table id="calls"></table></div>
+    </div>
+    <div class="grid" style="align-content:start">
+      <div class="panel"><h2>ควบคุม Demo</h2>
+        <div class="row"><button id="demo">…</button><label class="row"><input type="checkbox" id="auto"> agent จำลองรับสายอัตโนมัติ</label></div>
+        <div class="mut" style="margin:6px 0 12px">Demo mode เปิด carrier + agent จำลอง (1101-1103) สำหรับสาธิตโดยไม่ต้องมีคนจริง</div>
+        <h2>ลูกค้าโทรพร้อมกัน</h2>
+        <div class="row"><input id="bn" type="number" min="1" max="30" value="8" style="width:70px">
+          <select id="bs"><option value="random">สุ่มเมนู 1-6</option></select><button id="batch" class="primary">โทรพร้อมกัน</button></div>
+        <div class="mut" style="margin-top:6px">ลูกค้าจำลองหลายสายโทร 1484 พร้อมกัน → IVR → คิว → agent</div>
+      </div>
+      <div class="panel"><h2>เหตุการณ์สด</h2><div class="ev" id="events"></div></div>
+    </div>
+  </div>
+</main>
+<script src="/static/common.js"></script>
+<script>
+$('#nav').outerHTML = nav('/demo/dashboard');
+const ST = { idle: 'พร้อม', busy: 'คุยสาย', ringing: 'สายเข้า', paused: 'พัก', logged_out: 'ออกจากคิว', offline: 'ออฟไลน์' };
+const STAGE = { ivr: 'IVR', queue: 'รอคิว', talking: 'คุยสาย', hold: 'พักสาย', dialing: 'กำลังโทรออก', connecting_agent: 'โทรหา Agent' };
+let S = null;
+const KPI = [['active_calls', 'สายที่ดำเนินการ'], ['waiting', 'รอในคิว'], ['completed', 'จบสายแล้ว'], ['abandoned', 'ทิ้งสาย']];
+
+function render(s) {
+  S = s;
+  $('#dstate').className = 'chip ' + (s.demo.enabled ? 'ok' : '');
+  $('#dstate').textContent = s.demo.enabled ? 'Demo: ON' : 'Demo: OFF';
+  $('#demo').textContent = s.demo.enabled ? 'ปิด Demo mode' : 'เปิด Demo mode';
+  $('#auto').checked = s.demo.auto;
+  const k = s.kpi, a = k.agents;
+  $('#kpis').innerHTML = KPI.map(([key, t]) => `<div class="kpi"><span class="mut">${t}</span><b>${k[key]}</b></div>`).join('')
+    + `<div class="kpi"><span class="mut">Agent พร้อม / คุย / พัก</span><b>${a.idle} / ${a.busy + a.ringing} / ${a.paused}</b></div>`;
+  $('#agents').innerHTML = s.agents.map(g => {
+    const c = g.call;
+    return `<div class="ag ${g.state}"><div class="row" style="justify-content:space-between"><span class="t">${g.extension}</span>
+      <span class="chip">${ST[g.state] || g.state}</span></div><div class="mut">${esc(g.name)} · ${g.kind === 'sim' ? 'จำลอง' : g.kind === 'web' ? 'web' : 'softphone'}</div>
+      <div>${c ? `${c.direction === 'outbound' ? '→' : '←'} ${esc(c.number)} ${c.queue_th ? '· ' + esc(c.queue_th) : ''}` : '<span class="mut">—</span>'}</div>
+      <div class="row" style="justify-content:space-between"><span class="mut">รับแล้ว ${g.calls_taken}</span>
+      ${g.kind === 'web' ? `<button class="sm danger" data-del="${g.extension}">ลบ</button>` : ''}</div></div>`;
+  }).join('') || '<span class="mut">ยังไม่มี agent — เปิด Demo mode หรือเพิ่ม Agent</span>';
+  $('#queues').innerHTML = '<tr><th>คิว</th><th>รอ</th><th>Agent</th><th>จบแล้ว</th><th>ทิ้ง</th></tr>'
+    + s.queues.map(q => `<tr><td>${esc(q.name_th)} <span class="mut mono">${q.name}</span></td><td>${q.waiting}</td><td>${q.members}</td><td>${q.completed}</td><td>${q.abandoned}</td></tr>`).join('');
+  $('#calls').innerHTML = '<tr><th>ทิศทาง</th><th>หมายเลข</th><th>สถานะ</th><th>คิว</th><th>Agent</th><th>เวลา</th></tr>'
+    + (s.calls.map(c => `<tr><td>${c.direction === 'inbound' ? 'เข้า' : 'ออก'}</td><td class="mono">${esc(c.number)}</td><td><span class="chip info">${STAGE[c.stage] || c.stage}</span></td>
+      <td>${esc(c.queue_th || '')}</td><td>${c.agent || ''}</td><td>${mmss(c.duration)}</td></tr>`).join('') || '<tr><td colspan="6" class="mut">ไม่มีสาย</td></tr>');
+  $('#events').innerHTML = s.events.map(e => `<div class="${e.kind}"><span class="mut">${fmtTime(e.ts)}</span> ${esc(e.text)}</div>`).join('');
+}
+
+async function tick() { try { render(await api('/demo/state', 'GET', null, true)); } catch (e) { /* api down */ } }
+$('#demo').onclick = async () => { await api(S && S.demo.enabled ? '/demo/disable' : '/demo/enable', 'POST'); tick(); };
+$('#auto').onchange = () => api('/demo/auto', 'POST', { auto: $('#auto').checked }).catch(() => { $('#auto').checked = false; });
+$('#add').onclick = async () => {
+  const r = await api('/demo/agents', 'POST', { name: $('#newname').value.trim() || null });
+  $('#newname').value = ''; toast(`เพิ่ม Agent ${r.extension} แล้ว — เปิด /demo/agent?ext=${r.extension}`, 'ok'); tick();
+};
+$('#agents').onclick = async e => {
+  const b = e.target.closest('[data-del]'); if (!b) return;
+  if (!confirm(`ลบ Agent ${b.dataset.del}?`)) return;
+  await api(`/demo/agents/${b.dataset.del}`, 'DELETE'); toast(`ลบ Agent ${b.dataset.del} แล้ว`, 'ok'); tick();
+};
+$('#batch').onclick = async () => {
+  if (S && !S.demo.enabled) await api('/demo/enable', 'POST');
+  const svc = $('#bs').value;
+  await api('/demo/inbound/batch', 'POST', { count: +$('#bn').value, service: svc === 'random' ? null : svc });
+  toast(`ลูกค้า ${$('#bn').value} สายกำลังโทรเข้า 1484`, 'ok');
+};
+loadConfig().then(c => {
+  $('#bs').innerHTML += Object.values(c.ivr_menu).map(v => `<option value="${v.service}">เมนู: ${esc(v.th)}</option>`).join('');
+  tick(); setInterval(tick, 1000);
+});
+</script></body></html>

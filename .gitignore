@@ -4,3 +4,12 @@ __pycache__/
 .env
 # corporate CA certs for TLS-inspecting proxies (local only)
 */certs/*.crt
+
+# ide
+.idea
+.vscode
+
+# terraform
+infra/terraform/*/.terraform/
+infra/terraform/*/*.tfstate*
+infra/terraform/*/terraform.tfvars

@@ -160,7 +160,7 @@ curl -H "$H" -X POST localhost:8000/callbacks/<call_id>/status -H 'content-type:
 - Hold / Transfer ใช้ปุ่มของ softphone (re-INVITE / REFER) หรือ `#` blind transfer, `*2` attended transfer ระหว่างสาย Queue
 - ใช้ softphone บนเครื่องอื่นใน LAN: `BIND_ADDR=0.0.0.0 HOST_MEDIA_ADDR=<LAN IP ของเครื่องนี้> docker compose up -d`
 
-> Port RTP 10000-10050/udp ถูก publish ผ่าน Docker NAT จึงตั้ง `media_address` ให้ endpoint 1001-1003 (ดู [pjsip.conf](asterisk/etc/pjsip.conf)) — บน server จริงไม่จำเป็น
+> Port RTP 10000-10100/udp ถูก publish ผ่าน Docker NAT จึงตั้ง `media_address` ให้ endpoint 1001-1003 (ดู [pjsip.conf](asterisk/etc/pjsip.conf)) — บน server จริงไม่จำเป็น
 
 ## Outbound Call + สถานะผลสาย / Recording
 

@@ -17,7 +17,7 @@ services:
       - "${BIND_ADDR:-127.0.0.1}:5060:5060/udp"
       - "${BIND_ADDR:-127.0.0.1}:10000-10100:10000-10100/udp"
       - "127.0.0.1:5038:5038"   # AMI
-      - "127.0.0.1:8088:8088"   # ARI / HTTP / WebSocket SIP (ws://localhost:8088/ws)
+      - "${BIND_ADDR:-127.0.0.1}:8088:8088"   # ARI / HTTP / WebSocket SIP (ws://localhost:8088/ws)
     volumes:
       - ./asterisk/etc:/etc/asterisk-src:ro
       - pbx-monitor:/var/spool/asterisk/monitor
@@ -41,7 +41,7 @@ services:
     volumes:
       - ./sim/etc:/etc/asterisk-src:ro
     ports:
-      - "127.0.0.1:8089:8088"      # ARI + WebSocket SIP for the customers' browsers (ws://localhost:8089/ws)
+      - "${BIND_ADDR:-127.0.0.1}:8089:8088"      # ARI + WebSocket SIP for the customers' browsers (ws://localhost:8089/ws)
       - "${BIND_ADDR:-127.0.0.1}:12000-12100:12000-12100/udp"
     networks:
       poc:
@@ -55,7 +55,7 @@ services:
     environment:
       API_KEY: ${API_KEY:-poc-api-key}
     ports:
-      - "127.0.0.1:8000:8000"
+      - "${API_BIND_ADDR:-127.0.0.1}:8000:8000"
     volumes:
       - pbx-monitor:/pbx-monitor:ro
       - pbx-log:/pbx-log:ro

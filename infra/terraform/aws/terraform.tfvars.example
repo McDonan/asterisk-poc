@@ -1,0 +1,14 @@
+key_name    = "my-keypair"
+admin_cidrs = ["10.0.0.0/24"]      # VPN client range (private subnet) or your public IP
+sip_cidrs   = ["10.0.0.0/24"]      # VPN range of softphone users, or public IPs if assign_eip
+subnet_id   = "subnet-0123456789abcdef0" # agreed non-prod subnet
+# permissions_boundary_arn = "arn:aws:iam::123456789012:policy/boundary"
+extra_tags  = { Owner = "your-name", Expiry = "2026-12-25" }
+assign_eip = false # true only for a public subnet
+# alb_security_group_id = "sg-0123456789abcdef0" # existing private ALB
+
+# Whitelist mode (no VPN): needs a public subnet. Use fixed public IPs, never 0.0.0.0/0
+# assign_eip  = true
+# admin_cidrs = ["203.0.113.10/32"]
+# sip_cidrs   = ["203.0.113.10/32", "198.51.100.20/32"]
+# enable_ssh = true # only if SSM is not available (opens 22 to admin_cidrs)

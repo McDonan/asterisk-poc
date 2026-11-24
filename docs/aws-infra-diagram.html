@@ -1,0 +1,326 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Asterisk POC on AWS</title>
+<style>
+:root{
+  --bg:#f6f7f9; --surface:#ffffff; --ink:#1d2330; --muted:#5b6475; --line:#3c4556; --stroke:#c9ced8;
+  --hdr:#4b7a2a; --hdr-ink:#ffffff;
+  --site-bg:#e6f1df; --site-bd:#7aa765;
+  --box-bg:#e3eaf5; --box-bd:#6f86ad;
+  --legacy-bg:#fbe7a6; --legacy-bd:#c9a53a;
+  --ocp:#d42020; --ocp-bg:rgba(212,32,32,0.04);
+  --pod-bg:#ffffff;
+  --apigw:#3b62b8;
+  --icon:#4a5160;
+  --dev-bg:#e0f0f1; --dev-bd:#4f9ea3;
+  --sit-bg:#fcefd6; --sit-bd:#d4a24a;
+  --uat-bg:#ece5f6; --uat-bd:#9a86c2;
+  --prod-bg:#e3f1df; --prod-bd:#6aa35f;
+  --ai-bg:#1f7a4d; --ocr-bg:#2f5f8f; --db-bg:#2aa952; --redis-bg:#b8452f; --ext-bg:#ff5a5f; --ext-bd:#d9363c;
+}
+@media (prefers-color-scheme: dark){
+  :root:not([data-theme="light"]){
+    --bg:#14171d; --surface:#1d222b; --ink:#e7eaf0; --muted:#9aa3b4; --line:#aab3c3; --stroke:#3a4250;
+    --hdr:#4f8a2b; --hdr-ink:#ffffff;
+    --site-bg:#1c2a1a; --site-bd:#5d9149;
+    --box-bg:#1d2638; --box-bd:#5b77a3;
+    --legacy-bg:#3a3118; --legacy-bd:#b8952e;
+    --ocp:#ff5c5c; --ocp-bg:rgba(255,92,92,0.06);
+    --pod-bg:#232a35;
+    --apigw:#5b82d6;
+    --icon:#c3c9d4;
+    --dev-bg:#16292b; --dev-bd:#4a9196;
+    --sit-bg:#33291a; --sit-bd:#c08f3a;
+    --uat-bg:#262036; --uat-bd:#8a74b8;
+    --prod-bg:#1b2b1c; --prod-bd:#5c9a52;
+    --ai-bg:#2d9a64; --ocr-bg:#3f78b0; --db-bg:#24914a; --redis-bg:#c4553e; --ext-bg:#c8474b; --ext-bd:#e0676b;
+  }
+}
+:root[data-theme="dark"]{
+  --bg:#14171d; --surface:#1d222b; --ink:#e7eaf0; --muted:#9aa3b4; --line:#aab3c3; --stroke:#3a4250;
+  --hdr:#4f8a2b; --hdr-ink:#ffffff;
+  --site-bg:#1c2a1a; --site-bd:#5d9149;
+  --box-bg:#1d2638; --box-bd:#5b77a3;
+  --legacy-bg:#3a3118; --legacy-bd:#b8952e;
+  --ocp:#ff5c5c; --ocp-bg:rgba(255,92,92,0.06);
+  --pod-bg:#232a35;
+  --apigw:#5b82d6;
+  --icon:#c3c9d4;
+  --dev-bg:#16292b; --dev-bd:#4a9196;
+  --sit-bg:#33291a; --sit-bd:#c08f3a;
+  --uat-bg:#262036; --uat-bd:#8a74b8;
+  --prod-bg:#1b2b1c; --prod-bd:#5c9a52;
+  --ai-bg:#2d9a64; --ocr-bg:#3f78b0; --db-bg:#24914a; --redis-bg:#c4553e; --ext-bg:#c8474b; --ext-bd:#e0676b;
+}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--ink);font:14px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI","Noto Sans Thai",sans-serif}
+main{max-width:1920px;margin:0 auto;padding:24px 16px 48px}
+h1{font-size:26px;margin:0 0 4px}
+h1 .brand{color:var(--hdr)}
+.sub{color:var(--muted);margin:0 0 20px}
+.canvas{background:var(--surface);border:1px solid var(--stroke);border-radius:12px;padding:12px;overflow-x:auto}
+svg{display:block;width:100%;min-width:1100px;height:auto}
+svg text{fill:var(--ink);font-family:inherit}
+.hdr{fill:var(--hdr)}
+.hdr-t{fill:var(--hdr-ink)!important;font-weight:700;font-size:17px}
+.sep{stroke:var(--muted);stroke-width:1.2;stroke-dasharray:4 5;opacity:.6}
+.t-lbl{font-size:13px;font-weight:700}
+.t-big{font-size:20px;font-weight:700}
+.t-box{font-size:12.5px}
+.t-b{font-weight:600}
+.t-small{font-size:11px;fill:var(--muted)}
+.site{fill:var(--site-bg);stroke:var(--site-bd);stroke-width:1.5}
+.box{fill:var(--box-bg);stroke:var(--box-bd);stroke-width:1.5}
+.legacy{fill:var(--legacy-bg);stroke:var(--legacy-bd);stroke-width:1.5}
+.ocp{fill:var(--ocp-bg);stroke:var(--ocp);stroke-width:1.5;stroke-dasharray:7 4}
+.ocp-t{fill:var(--ocp)!important;font-weight:700;font-size:12px}
+.router{fill:var(--pod-bg);stroke:var(--ocp);stroke-width:1.5}
+.node{fill:var(--surface);stroke:var(--line);stroke-width:1}
+.new-row td{background:var(--ocp-bg)}
+.cp{fill:var(--ocp-bg);stroke:var(--ocp);stroke-width:1;stroke-dasharray:4 3}
+.node-new{stroke:var(--ocp);stroke-width:1.5;stroke-dasharray:5 3}
+.new-t{fill:var(--ocp)!important;font-size:10px;font-weight:700}
+.pod{fill:var(--pod-bg);stroke:var(--ocp);stroke-width:1}
+.apigw{fill:var(--apigw)}
+.apigw-t{fill:#fff!important;font-weight:700;font-size:13px}
+.hub{fill:var(--hdr)}
+.arrow{stroke:var(--line);stroke-width:1.4;fill:none}
+.arrow.dash{stroke-dasharray:5 4}
+.arrow.repl{stroke-dasharray:4 4}
+#ah path{fill:var(--line)}
+.ico rect{fill:var(--icon)}
+.ico circle{fill:var(--surface)}
+.tbc{font-style:italic}
+section{margin-top:28px}
+h2{font-size:17px;margin:0 0 10px}
+.tbl-wrap{overflow-x:auto}
+table{border-collapse:collapse;width:100%;background:var(--surface);border:1px solid var(--stroke);font-size:13px}
+th,td{text-align:left;padding:8px 10px;border-bottom:1px solid var(--stroke);vertical-align:top}
+th{color:var(--muted);font-weight:600;white-space:nowrap}
+td.num{text-align:right;font-variant-numeric:tabular-nums}
+ul{margin:0;padding-left:20px}
+li{margin:4px 0}
+.grid{display:grid;grid-template-columns:1.2fr 1fr;gap:20px}
+@media (max-width:900px){.grid{grid-template-columns:1fr}}
+.card{background:var(--surface);border:1px solid var(--stroke);border-radius:8px;padding:14px 16px}
+.card h3{margin:0 0 8px;font-size:15px}
+.env-dev{fill:var(--dev-bg);stroke:var(--dev-bd)}
+.env-sit{fill:var(--sit-bg);stroke:var(--sit-bd)}
+.env-uat{fill:var(--uat-bg);stroke:var(--uat-bd)}
+.env-prod{fill:var(--prod-bg);stroke:var(--prod-bd)}
+.env{stroke-width:1.2;stroke-dasharray:5 3}
+.np{fill:none;stroke:var(--muted);stroke-width:1.5;stroke-dasharray:9 5}
+.svc{fill:var(--surface);stroke:var(--line);stroke-width:1}
+.ai{fill:var(--ai-bg)} .ocr{fill:var(--ocr-bg)}
+.inv{fill:#fff!important;font-weight:600}
+.dbc{fill:var(--db-bg)} .rdc{fill:var(--redis-bg)}
+.ext{fill:var(--ext-bg);stroke:var(--ext-bd)}
+.arrow.inbound{stroke:var(--ext-bd);stroke-width:1.8}
+.arrow.egress{stroke:var(--apigw);stroke-width:1.8}
+.t-env{font-size:13px;font-weight:700}
+</style>
+</head>
+<body>
+<main>
+<h1><span class="brand">Asterisk POC</span> | Architecture</h1>
+<p class="sub">Phase 1: single EC2 borrowed into an existing non-prod VPC</p>
+<h2 style="margin-top:28px">Option A · VPN only (default, no public IP)</h2>
+<div class="canvas">
+<svg viewBox="0 0 1880 640" role="img" aria-label="AWS infra diagram A">
+  <defs>
+    <marker id="ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z"/>
+    </marker>
+    <symbol id="srv" viewBox="0 0 28 30">
+      <g class="ico">
+        <rect x="0" y="0" width="28" height="8" rx="1.5"/><circle cx="22" cy="4" r="1.6"/><circle cx="17" cy="4" r="1.6"/>
+        <rect x="0" y="11" width="28" height="8" rx="1.5"/><circle cx="22" cy="15" r="1.6"/><circle cx="17" cy="15" r="1.6"/>
+        <rect x="0" y="22" width="28" height="8" rx="1.5"/><circle cx="22" cy="26" r="1.6"/><circle cx="17" cy="26" r="1.6"/>
+      </g>
+    </symbol>
+    <symbol id="usr" viewBox="0 0 36 40">
+      <circle cx="18" cy="11" r="9" fill="#3fae49"/>
+      <path d="M2 40 v-8 a16 12 0 0 1 32 0 v8 z" fill="#3fae49"/>
+    </symbol>
+  </defs>
+  <line class="sep" x1="250" y1="96" x2="250" y2="620"/>
+  <rect class="hdr" x="268" y="20" width="210" height="60" rx="4"/>
+  <text class="hdr-t" x="373" y="56" text-anchor="middle">Network Edge</text>
+  <line class="sep" x1="498" y1="96" x2="498" y2="620"/>
+  <rect class="hdr" x="516" y="20" width="1000" height="60" rx="4"/>
+  <text class="hdr-t" x="1016" y="56" text-anchor="middle">AWS · ap-southeast-1 (Non-Prod)</text>
+  <line class="sep" x1="1538" y1="96" x2="1538" y2="620"/>
+  <rect class="hdr" x="1556" y="20" width="296" height="60" rx="4"/>
+  <text class="hdr-t" x="1704" y="56" text-anchor="middle">External Systems</text>
+  <use href="#usr" x="62" y="140" width="36" height="40"/>
+  <text class="t-lbl" x="110" y="156" text-decoration="underline">VPN</text>
+  <text class="t-box" x="40" y="202">Tester / softphone</text>
+  <text class="t-small" x="40" y="220">over VPN · sip_cidrs</text>
+  <path class="arrow" d="M200 196 H286" marker-end="url(#ah)"/>
+  <use href="#usr" x="62" y="400" width="36" height="40"/>
+  <text class="t-lbl" x="110" y="416" text-decoration="underline">VPN</text>
+  <text class="t-box" x="40" y="462">Admin / deployer</text>
+  <text class="t-small" x="40" y="480">over VPN · admin_cidrs</text>
+  <path class="arrow" d="M200 456 H286" marker-end="url(#ah)"/>
+  <rect class="box" x="288" y="150" width="170" height="380" rx="4"/>
+  <use href="#srv" x="352" y="174" width="42" height="45"/>
+  <text class="t-box t-b" x="373" y="239" text-anchor="middle">Security Group</text>
+  <text class="t-small" x="373" y="255" text-anchor="middle">SIP+RTP: sip_cidrs</text>
+  <text class="t-small" x="373" y="269" text-anchor="middle">SSH+API: admin_cidrs</text>
+  <use href="#srv" x="352" y="340" width="42" height="45"/>
+  <text class="t-box t-b" x="373" y="405" text-anchor="middle">Private ALB</text>
+  <text class="t-small" x="373" y="421" text-anchor="middle">existing · API 8000 only</text>
+  <text class="t-small" x="373" y="462" text-anchor="middle">no public IP · no EIP</text>
+  <text class="t-small" x="373" y="484" text-anchor="middle">SIP/RTP direct (VPN)</text>
+  <path class="arrow" d="M373 300 V336" marker-end="url(#ah)"/>
+  <text class="t-big" x="516" y="122">MEOWJOT VPC · PRIVATE SUBNET (TBC)</text>
+  <rect class="site" x="516" y="130" width="1000" height="480" rx="4"/>
+  <rect class="env env-dev" x="528" y="142" width="976" height="100" rx="6"/>
+  <use href="#srv" x="544" y="149" width="18" height="19.7857"/>
+  <text class="t-box t-b" x="568" y="164">EXISTING · EKS Fargate, RDS, ElastiCache, Lambda (not modified)</text>
+  <rect class="svc" x="806" y="190" width="420" height="30" rx="15"/><text class="t-box" x="1016" y="209.5" text-anchor="middle">Meowjot services · Backoffice · AI Service</text>
+  <rect class="env env-prod" x="528" y="258" width="976" height="330" rx="6"/>
+  <use href="#srv" x="544" y="265" width="18" height="19.7857"/>
+  <text class="t-box t-b" x="568" y="280">NEW · EC2 asterisk-poc · t3.medium · Ubuntu 24.04 · Docker host</text>
+  <rect class="svc" x="636" y="310" width="240" height="30" rx="15"/><text class="t-box" x="756" y="329.5" text-anchor="middle">Asterisk PBX</text>
+  <rect class="svc" x="896" y="310" width="240" height="30" rx="15"/><text class="t-box" x="1016" y="329.5" text-anchor="middle">Call Simulator</text>
+  <rect class="svc" x="1156" y="310" width="240" height="30" rx="15"/><text class="t-box" x="1276" y="329.5" text-anchor="middle">API + Demo page</text>
+  <text class="t-small" x="1016" y="368" text-anchor="middle">docker compose · AMI/ARI on localhost only</text>
+  <rect class="svc" x="567" y="398" width="170" height="30" rx="15"/><text class="t-box" x="652" y="417.5" text-anchor="middle">IMDSv2 required</text>
+  <rect class="svc" x="749" y="398" width="170" height="30" rx="15"/><text class="t-box" x="834" y="417.5" text-anchor="middle">gp3 30 GB · encrypted</text>
+  <rect class="svc" x="931" y="398" width="170" height="30" rx="15"/><text class="t-box" x="1016" y="417.5" text-anchor="middle">SSH key pair</text>
+  <rect class="svc" x="1113" y="398" width="170" height="30" rx="15"/><text class="t-box" x="1198" y="417.5" text-anchor="middle">IAM role: SSM only</text>
+  <rect class="svc" x="1295" y="398" width="170" height="30" rx="15"/><text class="t-box" x="1380" y="417.5" text-anchor="middle">user-data: install Docker</text>
+  <text class="t-small" x="1016" y="464" text-anchor="middle">Recordings / CDR stored on instance disk (lost on destroy)</text>
+  <text class="t-small" x="1016" y="490" text-anchor="middle">Window: 23 Nov – 25 Dec · tags: Owner, Expiry</text>
+  <text class="t-small" x="1016" y="516" text-anchor="middle">No SG rule to RDS / ElastiCache / EKS</text>
+  <text class="t-small" x="1016" y="542" text-anchor="middle">Cost ≈ US$35 / month · terraform destroy removes everything</text>
+  <path class="arrow" d="M458 340 H528" marker-end="url(#ah)"/>
+  <text class="t-small t-b" x="464" y="332" text-anchor="start" font-style="italic">inbound</text>
+  <rect class="ext" x="1556" y="150" width="296" height="130" rx="3"/>
+  <text class="t-box inv" x="1704" y="190" text-anchor="middle">Internet</text>
+  <text class="t-small inv" x="1704" y="214" text-anchor="middle" style="font-weight:400">apt · Docker · Ubuntu AMI (allow-list TBC)</text>
+  <text class="t-small inv" x="1704" y="238" text-anchor="middle" style="font-weight:400">via KX Firewall / shared Network Firewall</text>
+  <path class="arrow egress" d="M1504 322 H1530 V215 H1552" marker-end="url(#ah)"/>
+  <text class="t-small t-b" x="1498" y="314" text-anchor="end" font-style="italic">egress</text>
+  <rect class="legacy" x="1556" y="296" width="296" height="150" rx="3"/>
+  <text class="t-lbl" x="1836" y="322" text-anchor="end" text-decoration="underline">Terraform creates (4–5)</text>
+  <text class="t-small" x="1704" y="354" text-anchor="middle">aws_instance</text>
+  <text class="t-small" x="1704" y="376" text-anchor="middle">aws_eip (optional, off)</text>
+  <text class="t-small" x="1704" y="398" text-anchor="middle">aws_security_group</text>
+  <text class="t-small" x="1704" y="420" text-anchor="middle">IAM role (SSM) + profile</text>
+  <rect class="box" x="1556" y="462" width="296" height="120" rx="3"/>
+  <text class="t-box" x="1704" y="490" text-anchor="middle">Not created</text>
+  <text class="t-small" x="1704" y="514" text-anchor="middle">No VPC / subnet / ALB / NAT / KMS / RDS</text>
+  <text class="t-small" x="1704" y="536" text-anchor="middle">No TLS / CloudWatch / backup</text>
+  <text class="t-small" x="1704" y="558" text-anchor="middle">No changes to the existing service</text>
+</svg>
+</div>
+<h2 style="margin-top:28px">Option B · Whitelisted public IP (no VPN)</h2>
+<p class="sub">Requires public subnet, EIP and security approval. Softphone users need a fixed public IP.</p>
+<div class="canvas">
+<svg viewBox="0 0 1880 520" role="img" aria-label="AWS infra diagram B">
+  <defs>
+    <marker id="ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z"/>
+    </marker>
+    <symbol id="srv" viewBox="0 0 28 30">
+      <g class="ico">
+        <rect x="0" y="0" width="28" height="8" rx="1.5"/><circle cx="22" cy="4" r="1.6"/><circle cx="17" cy="4" r="1.6"/>
+        <rect x="0" y="11" width="28" height="8" rx="1.5"/><circle cx="22" cy="15" r="1.6"/><circle cx="17" cy="15" r="1.6"/>
+        <rect x="0" y="22" width="28" height="8" rx="1.5"/><circle cx="22" cy="26" r="1.6"/><circle cx="17" cy="26" r="1.6"/>
+      </g>
+    </symbol>
+    <symbol id="usr" viewBox="0 0 36 40">
+      <circle cx="18" cy="11" r="9" fill="#3fae49"/>
+      <path d="M2 40 v-8 a16 12 0 0 1 32 0 v8 z" fill="#3fae49"/>
+    </symbol>
+  </defs>
+  <line class="sep" x1="250" y1="96" x2="250" y2="500"/>
+  <rect class="hdr" x="268" y="20" width="210" height="60" rx="4"/>
+  <text class="hdr-t" x="373" y="56" text-anchor="middle">Network Edge</text>
+  <line class="sep" x1="498" y1="96" x2="498" y2="500"/>
+  <rect class="hdr" x="516" y="20" width="1000" height="60" rx="4"/>
+  <text class="hdr-t" x="1016" y="56" text-anchor="middle">AWS · ap-southeast-1 (Non-Prod)</text>
+  <line class="sep" x1="1538" y1="96" x2="1538" y2="500"/>
+  <rect class="hdr" x="1556" y="20" width="296" height="60" rx="4"/>
+  <text class="hdr-t" x="1704" y="56" text-anchor="middle">External Systems</text>
+  <use href="#usr" x="62" y="140" width="36" height="40"/>
+  <text class="t-lbl" x="110" y="156" text-decoration="underline">Internet</text>
+  <text class="t-box" x="40" y="202">Softphone / tester</text>
+  <text class="t-small" x="40" y="220">whitelisted public IP</text>
+  <path class="arrow" d="M200 196 H286" marker-end="url(#ah)"/>
+  <use href="#usr" x="62" y="330" width="36" height="40"/>
+  <text class="t-lbl" x="110" y="346" text-decoration="underline">Internet</text>
+  <text class="t-box" x="40" y="392">Admin / deployer</text>
+  <text class="t-small" x="40" y="410">whitelisted public IP</text>
+  <path class="arrow" d="M200 386 H286" marker-end="url(#ah)"/>
+  <rect class="box" x="288" y="150" width="170" height="300" rx="4"/>
+  <use href="#srv" x="352" y="174" width="42" height="45"/>
+  <text class="t-box t-b" x="373" y="239" text-anchor="middle">Security Group</text>
+  <text class="t-small" x="373" y="255" text-anchor="middle">SIP+RTP: sip_cidrs</text>
+  <text class="t-small" x="373" y="269" text-anchor="middle">SSH+API: admin_cidrs</text>
+  <use href="#srv" x="352" y="314" width="42" height="45"/>
+  <text class="t-box t-b" x="373" y="379" text-anchor="middle">Elastic IP</text>
+  <text class="t-small" x="373" y="395" text-anchor="middle">assign_eip = true</text>
+  <path class="arrow" d="M373 300 V310" marker-end="url(#ah)"/>
+  <text class="t-small" x="373" y="410" text-anchor="middle">no 0.0.0.0/0 · UDP direct</text>
+  <text class="t-big" x="516" y="122">MEOWJOT VPC · PUBLIC SUBNET (TBC)</text>
+  <rect class="site" x="516" y="130" width="1000" height="340" rx="4"/>
+  <rect class="env env-dev" x="528" y="142" width="976" height="100" rx="6"/>
+  <use href="#srv" x="544" y="149" width="18" height="19.7857"/>
+  <text class="t-box t-b" x="568" y="164">EXISTING · EKS Fargate, RDS, ElastiCache, Lambda (not modified)</text>
+  <rect class="svc" x="806" y="190" width="420" height="30" rx="15"/><text class="t-box" x="1016" y="209.5" text-anchor="middle">Private subnets · no route / SG rule to PoC</text>
+  <rect class="env env-prod" x="528" y="258" width="976" height="200" rx="6"/>
+  <use href="#srv" x="544" y="265" width="18" height="19.7857"/>
+  <text class="t-box t-b" x="568" y="280">NEW · EC2 asterisk-poc · public subnet (IGW route required)</text>
+  <rect class="svc" x="636" y="308" width="240" height="30" rx="15"/><text class="t-box" x="756" y="327.5" text-anchor="middle">Asterisk PBX</text>
+  <rect class="svc" x="896" y="308" width="240" height="30" rx="15"/><text class="t-box" x="1016" y="327.5" text-anchor="middle">Call Simulator</text>
+  <rect class="svc" x="1156" y="308" width="240" height="30" rx="15"/><text class="t-box" x="1276" y="327.5" text-anchor="middle">API + Demo page</text>
+  <text class="t-small" x="1016" y="366" text-anchor="middle">RTP 10000-10100/udp advertised as the EIP (HOST_MEDIA_ADDR)</text>
+  <text class="t-small" x="1016" y="392" text-anchor="middle">Needs: public subnet + approval for a public IP in this VPC</text>
+  <text class="t-small" x="1016" y="418" text-anchor="middle">Window 23 Nov – 25 Dec · then terraform destroy (EIP released)</text>
+  <path class="arrow" d="M458 330 H528" marker-end="url(#ah)"/>
+  <text class="t-small t-b" x="464" y="322" text-anchor="start" font-style="italic">inbound</text>
+  <rect class="ext" x="1556" y="150" width="296" height="120" rx="3"/>
+  <text class="t-box inv" x="1704" y="190" text-anchor="middle">Internet</text>
+  <text class="t-small inv" x="1704" y="214" text-anchor="middle" style="font-weight:400">apt · Docker · Ubuntu AMI</text>
+  <text class="t-small inv" x="1704" y="236" text-anchor="middle" style="font-weight:400">egress via IGW: 443/80/DNS/NTP</text>
+  <path class="arrow egress" d="M1504 330 H1530 V210 H1552" marker-end="url(#ah)"/>
+  <text class="t-small t-b" x="1498" y="322" text-anchor="end" font-style="italic">egress</text>
+</svg>
+</div>
+<section class="grid">
+<div class="card"><h3>30-min agenda</h3><ol>
+<li>0–3 · Ask: one EC2 (POC) in Meowjot VPC, 23 Nov – 25 Dec, then destroy</li>
+<li>3–10 · Walk the diagram: 3 new resources, nothing existing modified</li>
+<li>10–25 · Concerns by team (below) and agreed mitigations</li>
+<li>25–30 · Decisions, owners, end date / destroy plan</li></ol></div>
+<div class="card"><h3>Risk Management</h3><ul>
+<li>Blast radius: shared VPC with another service; nothing else changed</li>
+<li>Data: lab/simulated calls only, no real customer data (confirm)</li>
+<li>Time-box + owner + cost cap (~US$35/mo); destroy = one command</li>
+<li>Lab-grade SIP passwords: never open SIP to 0.0.0.0/0</li></ul></div>
+<div class="card"><h3>Security</h3><ul>
+<li>Inbound only from allow-listed CIDRs (SIP/RTP UDP, SSH, API 8000)</li>
+<li>Fixed: egress limited, SSM role, encrypted disk. Remaining: API plain HTTP (use SSH tunnel), no WAF/logging</li>
+<li>IMDSv2 enforced; root volume encrypted; SSM Session Manager available</li>
+<li>No public IP: access only over VPN (assign_eip=false)</li></ul></div>
+<div class="card"><h3>Platform</h3><ul>
+<li>Set subnet_id to the agreed subnet (variable added; default VPC only as fallback)</li>
+<li>Tags via extra_tags, optional IAM permissions boundary, quotas</li>
+<li>Terraform state location and who may apply in this account</li>
+<li>Private ALB rule for API 8000 (alb_security_group_id); SIP/RTP UDP cannot use ALB, so VPN direct</li></ul></div>
+<div class="card"><h3>Open questions (TBC)</h3><ul>
+<li>Exact subnet; NAT / KX Firewall allow-list for apt, Docker, Ubuntu repos?</li>
+<li>Required tags, IAM role/permission boundary for deployer</li>
+<li>Logging: VPC flow logs / CloudTrail / SSM instead of SSH?</li>
+<li>Planned end date and who approves extension</li></ul></div>
+</section>
+
+</main>
+</body>
+</html>

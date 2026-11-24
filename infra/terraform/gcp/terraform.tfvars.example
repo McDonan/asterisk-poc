@@ -1,0 +1,4 @@
+project_id  = "my-asterisk-poc"
+admin_cidrs = ["203.0.113.10/32"] # fixed public IPs of the demo devices (Web UI, browser softphone)
+sip_cidrs   = ["203.0.113.10/32"] # same list for SIP and RTP
+# extra_labels = { owner = "your-name", expiry = "2026-12-25" }

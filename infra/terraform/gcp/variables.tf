@@ -10,7 +10,7 @@ variable "region" {
 
 variable "zone" {
   type    = string
-  default = "asia-southeast1-a"
+  default = "asia-southeast1-b"
 }
 
 variable "network" {
@@ -43,4 +43,10 @@ variable "extra_labels" {
   description = "Extra labels (owner, expiry...). Values: lowercase letters, digits, _ and -"
   type        = map(string)
   default     = {}
+}
+
+variable "acme_cidrs" {
+  description = "Sources allowed on 80/tcp for the Let's Encrypt HTTP-01 challenge (validators use many IPs). Caddy only redirects to HTTPS there. Set to [] after the certificate is issued."
+  type        = list(string)
+  default     = ["0.0.0.0/0"]
 }

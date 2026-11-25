@@ -4,9 +4,15 @@ ARG ASTERISK_VERSION=22.11.0
 ENV DEBIAN_FRONTEND=noninteractive
 
 # Pipelining off + no proxy cache: avoids "Hash Sum mismatch" behind some proxies / flaky networks
-RUN printf 'Acquire::Retries "5";\nAcquire::http::Pipeline-Depth "0";\nAcquire::http::No-Cache "true";\nAcquire::http::Timeout "60";\n' > /etc/apt/apt.conf.d/80network \
+# apt over HTTPS (port 443 only): the slim image has no CA bundle yet, so the first step skips peer
+# verification just to fetch ca-certificates (packages stay GPG-verified), then verification is re-enabled
+RUN sed -i 's|http://deb.debian.org|https://deb.debian.org|g' /etc/apt/sources.list.d/debian.sources \
+    && printf 'Acquire::Retries "5";\nAcquire::http::Pipeline-Depth "0";\nAcquire::http::No-Cache "true";\nAcquire::http::Timeout "60";\n' > /etc/apt/apt.conf.d/80network \
+    && printf 'Acquire::https::Verify-Peer "false";\n' > /etc/apt/apt.conf.d/99bootstrap-tls \
+    && apt-get update && apt-get install -y --no-install-recommends ca-certificates \
+    && rm /etc/apt/apt.conf.d/99bootstrap-tls \
     && apt-get update && apt-get install -y --no-install-recommends --fix-missing \
-        build-essential ca-certificates curl wget bzip2 xz-utils patch pkg-config \
+        build-essential curl wget bzip2 xz-utils patch pkg-config \
         libssl-dev libxml2-dev libncurses-dev libsqlite3-dev uuid-dev libjansson-dev \
         libedit-dev libxslt1-dev libsrtp2-dev libcurl4-openssl-dev \
         python3 sox espeak-ng gettext-base \
@@ -19,7 +25,7 @@ RUN update-ca-certificates
 # Build Asterisk from source (LTS release) - sounds + MOH are downloaded during "make install"
 RUN set -eux; \
     mkdir -p /usr/src/asterisk; cd /usr/src/asterisk; \
-    curl -fsSL "https://downloads.asterisk.org/pub/telephony/asterisk/asterisk-${ASTERISK_VERSION}.tar.gz" \
+    curl -fsSL "https://downloads.asterisk.org/pub/telephony/asterisk/releases/asterisk-${ASTERISK_VERSION}.tar.gz" \
         | tar xz --strip-components=1; \
     ./configure --with-jansson-bundled --with-pjproject-bundled --without-x11 >/dev/null; \
     make menuselect.makeopts; \

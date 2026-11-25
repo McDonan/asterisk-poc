@@ -99,7 +99,7 @@ async function begin(newMode) {
   hbT = setInterval(() => api(`/demo/customers/${number}/heartbeat?mode=${mode === 'real' ? 'web' : 'sim'}`, 'POST', null, true).catch(() => {}), 5000);
   if (mode === 'real') {
     phone = new Softphone({
-      server: `ws://${location.hostname}:${cfg.sim_ws_port}/ws`, domain: location.hostname, user: number, password: c.password,
+      server: location.protocol === 'https:' ? `wss://${location.host}/sim/ws` : `ws://${location.hostname}:${cfg.sim_ws_port}/ws`, domain: location.hostname, user: number, password: c.password,
       displayName: `Customer ${number}`, audio: $('#remote'), muted: !micOn,
       onRegistration: s => { reg = s; render(); },
       onCall: ci => { if (ci.error) toast('สายไม่สำเร็จ: ' + ci.error, 'err'); render(); },

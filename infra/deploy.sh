@@ -35,6 +35,10 @@ case "$CLOUD" in
   *) echo "cloud must be aws or gcp" >&2; exit 1 ;;
 esac
 
+# HTTPS (Caddy + Let's Encrypt on a nip.io name) only where the address is a public IP we own
+SITE=""
+[ "$CLOUD" = gcp ] && SITE="${ADDR//./-}.nip.io"
+
 echo "Waiting for instance bootstrap ($CLOUD, $ADDR) ..."
 until remote "test -f /var/lib/asterisk-poc-ready" 2>/dev/null; do sleep 5; done
 
@@ -48,11 +52,12 @@ remote "sudo bash -s" <<REMOTE
 set -e
 cd /opt/asterisk-poc
 [ -f .env ] || printf 'API_KEY=%s\n' "\$(openssl rand -hex 16)" > .env
-sed -i '/^BIND_ADDR=/d;/^API_BIND_ADDR=/d;/^HOST_MEDIA_ADDR=/d' .env
+sed -i '/^BIND_ADDR=/d;/^API_BIND_ADDR=/d;/^HOST_MEDIA_ADDR=/d;/^SITE_ADDRESS=/d;/^COMPOSE_PROFILES=/d' .env
 printf 'BIND_ADDR=0.0.0.0\nAPI_BIND_ADDR=0.0.0.0\nHOST_MEDIA_ADDR=$ADDR\n' >> .env
+[ -n '$SITE' ] && printf 'SITE_ADDRESS=$SITE\nCOMPOSE_PROFILES=https\n' >> .env
 docker compose up -d --build
 REMOTE
 
-echo "Demo:    http://$ADDR:8000/demo"
+if [ -n "$SITE" ]; then echo "Demo:    https://$SITE/demo   (browser mic works over HTTPS)"; else echo "Demo:    http://$ADDR:8000/demo"; fi
 echo "API key: run on the VM: sudo grep API_KEY /opt/asterisk-poc/.env"
 echo "SIP:     register softphone to $ADDR:5060 as 1001 (see asterisk/etc/pjsip.conf)"

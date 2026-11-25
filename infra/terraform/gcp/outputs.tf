@@ -7,7 +7,7 @@ output "public_ip" {
 }
 
 output "demo_url" {
-  value = "http://${google_compute_address.pbx.address}:8000/demo"
+  value = "https://${replace(google_compute_address.pbx.address, ".", "-")}.nip.io/demo"
 }
 
 output "cloud" {

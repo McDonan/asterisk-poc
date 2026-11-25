@@ -60,6 +60,33 @@ resource "google_compute_firewall" "tcp" {
   }
 }
 
+# HTTPS front (Caddy): 443 for the demo devices, 80 only for the Let's Encrypt HTTP-01 challenge
+resource "google_compute_firewall" "https" {
+  name          = "${local.name}-https"
+  network       = data.google_compute_network.net.name
+  direction     = "INGRESS"
+  source_ranges = var.admin_cidrs
+  target_tags   = [local.tag]
+
+  allow {
+    protocol = "tcp"
+    ports    = ["443"]
+  }
+}
+
+resource "google_compute_firewall" "acme" {
+  name          = "${local.name}-acme"
+  network       = data.google_compute_network.net.name
+  direction     = "INGRESS"
+  source_ranges = var.acme_cidrs
+  target_tags   = [local.tag]
+
+  allow {
+    protocol = "tcp"
+    ports    = ["80"]
+  }
+}
+
 # Identity-Aware Proxy range only: shell access without exposing SSH to the internet
 resource "google_compute_firewall" "iap" {
   name          = "${local.name}-iap-ssh"

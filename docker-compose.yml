@@ -66,6 +66,23 @@ services:
       poc:
         ipv4_address: 172.28.0.30
 
+  caddy:
+    image: caddy:2
+    container_name: poc-caddy
+    profiles: [https]
+    restart: unless-stopped
+    depends_on: [api, pbx, sim]
+    environment:
+      SITE_ADDRESS: ${SITE_ADDRESS:-localhost}
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./caddy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+    networks:
+      - poc
+
   e2e:
     build: ./api
     profiles: [test]
@@ -88,6 +105,7 @@ volumes:
   pbx-log:
   pbx-dyn:
   api-data:
+  caddy-data:
 
 networks:
   poc:
